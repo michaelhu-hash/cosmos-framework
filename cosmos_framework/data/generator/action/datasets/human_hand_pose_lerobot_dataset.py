@@ -14,11 +14,17 @@ import pyarrow.parquet as pq
 import torch
 from lerobot.datasets.video_utils import decode_video_frames
 
+from cosmos_framework.data.generator.action.datasets.base_dataset import (
+    LEGACY_NORMALIZATION_METHODS,
+    SUPPORTED_POSE_CONVENTIONS,
+    ActionBaseDataset,
+)
 from cosmos_framework.data.generator.action.utils.action_spec import ActionSpec, Pos, Rot, build_action_spec
-from cosmos_framework.data.generator.action.datasets.base_dataset import ActionBaseDataset
 from cosmos_framework.data.generator.action.utils.pose_utils import build_abs_pose_from_components, pose_abs_to_rel
 
-PoseConvention = Literal["backward_framewise"]
+PoseConvention = Literal[
+    "backward_framewise", "backward_anchored", "backward_chunk_anchored_8f", "backward_chunk_anchored_16f"
+]
 Viewpoint = Literal["ego_view"]
 
 _HAND_RIGHT_POSITION_KEY = "observation.state.hand_right_cam"
@@ -34,6 +40,13 @@ _WRIST_JOINT_IDX = 0
 _FINGERTIP_JOINT_IDXS = (4, 8, 12, 16, 20)
 _RAW_ACTION_DIM = 57
 _NORMALIZER_PATH = Path(__file__).parent.parent / "normalizer_stats/human_hand_pose_lerobot_stats.json"
+# Cosmos3-Nano-HumanAction (domain ``hand_pose`` = 3, same 57D layout) was post-trained with 72-step chunks,
+# ``backward_chunk_anchored_16f`` deltas and ``piecewise_asinh_rot`` normalization; pass these stats explicitly:
+#   HumanHandPoseLeRobotDataset(root, chunk_length=72, pose_convention="backward_chunk_anchored_16f",
+#                               action_normalization="piecewise_asinh_rot", stats_path=HUMANACTION_NORMALIZER_PATH)
+HUMANACTION_NORMALIZER_PATH = (
+    Path(__file__).parent.parent / "normalizer_stats/human_hand_pose_humanaction_lerobot_stats.json"
+)
 
 # Rotate the source wrist frames into the unified convention:
 # X = thumb-to-pinky, Y = outward palm normal, Z = wrist-to-fingertips.
@@ -69,9 +82,14 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
         action_normalization: str | None = "quantile",
         sample_stride: int = 1,
         image_key: str = _IMAGE_FEATURE,
+        stats_path: str | Path | None = None,
     ) -> None:
         if viewpoint != "ego_view":
             raise NotImplementedError("Human hand-pose data only supports ego_view.")
+        if pose_convention not in SUPPORTED_POSE_CONVENTIONS:
+            raise NotImplementedError(
+                f"Unsupported pose_convention {pose_convention!r}; expected one of {SUPPORTED_POSE_CONVENTIONS}."
+            )
         super().__init__(
             root=root,
             domain_name="hand_pose",
@@ -83,6 +101,7 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
             viewpoint=viewpoint,
             action_normalization=action_normalization,
             sample_stride=sample_stride,
+            stats_path=stats_path,
         )
         source_fps = float(self._info["fps"])
         source_stride = source_fps / self._fps
@@ -152,7 +171,9 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
         ai_caption = random.choice([part.strip() for part in caption.split(" | ") if part.strip()] or [caption])
 
         result = self._build_result(mode=mode, video=video, action=raw_action, ai_caption=ai_caption)
-        if self.action_normalization is not None:
+        if self.action_normalization in LEGACY_NORMALIZATION_METHODS:
+            # Base Cosmos3-Nano recipe: quantile normalization with a hard clamp. The asinh-family normalizers
+            # compress tails instead and must not be clamped.
             result["action"] = result["action"].clamp(-1.0, 1.0)
         return result
 

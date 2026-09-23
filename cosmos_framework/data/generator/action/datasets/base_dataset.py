@@ -17,12 +17,23 @@ import pyarrow.parquet as pq
 import torch
 from torch.utils.data import Dataset
 
-from cosmos_framework.data.generator.action.action_normalization import load_action_stats, normalize_action
+from cosmos_framework.data.generator.action.action_normalization import (
+    denormalize_action,
+    load_action_stats,
+    normalize_action,
+)
+from cosmos_framework.data.generator.action.utils.action_processing import ActionNormalizer, load_action_normalizer
 from cosmos_framework.data.generator.action.utils.action_spec import ActionSpec
 from cosmos_framework.data.generator.action.utils.domain_utils import get_domain_id
 from cosmos_framework.data.generator.action.utils.pose_utils import compute_idle_frames
 
 _MODE_CHOICES = ("forward_dynamics", "inverse_dynamics", "wam")
+# Methods served by ``action_normalization.normalize_action`` (top-level stats JSON, optional clamp). Anything
+# else is resolved through ``utils.action_processing.load_action_normalizer`` (nested ``global`` /
+# ``global_raw`` stats blocks, e.g. ``piecewise_asinh_rot`` used by Cosmos3-Nano-HumanAction).
+LEGACY_NORMALIZATION_METHODS = ("quantile", "meanstd", "minmax")
+ANCHORED_POSE_CONVENTIONS = ("backward_anchored", "backward_chunk_anchored_8f", "backward_chunk_anchored_16f")
+SUPPORTED_POSE_CONVENTIONS = ("backward_framewise", *ANCHORED_POSE_CONVENTIONS)
 
 
 class ActionBaseDataset(ABC, Dataset):
@@ -43,10 +54,13 @@ class ActionBaseDataset(ABC, Dataset):
         viewpoint: str,
         action_normalization: str | None = "quantile",
         sample_stride: int = 1,
+        stats_path: str | Path | None = None,
     ) -> None:
         super().__init__()
-        if pose_convention != "backward_framewise":
-            raise NotImplementedError(f"{type(self).__name__} only supports backward_framewise pose deltas.")
+        if pose_convention not in SUPPORTED_POSE_CONVENTIONS:
+            raise NotImplementedError(
+                f"{type(self).__name__} supports pose conventions {SUPPORTED_POSE_CONVENTIONS}, got {pose_convention!r}."
+            )
 
         self._fps = float(fps)
         self._dt = 1.0 / self._fps
@@ -62,6 +76,10 @@ class ActionBaseDataset(ABC, Dataset):
         self._domain_id = get_domain_id(domain_name)
         self._action_normalization = action_normalization
         self._norm_stats: dict[str, torch.Tensor] | None = None
+        # Optional per-instance stats file. One reader can serve several checkpoints whose normalizers differ
+        # (e.g. base Cosmos3-Nano vs Cosmos3-Nano-HumanAction on the same hand-pose LeRobot data).
+        self._stats_path_override: Path | None = Path(stats_path) if stats_path is not None else None
+        self._action_normalizer: ActionNormalizer | None = None
 
         self._root = Path(root)
         self._info = json.loads((self._root / "meta" / "info.json").read_text())
@@ -138,10 +156,44 @@ class ActionBaseDataset(ABC, Dataset):
             key: torch.from_numpy(value).float() for key, value in load_action_stats(str(cls._stats_path())).items()
         }
 
+    def stats_path(self) -> Path:
+        """Stats file used by this instance: the constructor override, else the class default."""
+        return self._stats_path_override if self._stats_path_override is not None else type(self)._stats_path()
+
+    def _resolve_action_normalizer(self) -> ActionNormalizer:
+        if self._action_normalizer is None:
+            self._action_normalizer = load_action_normalizer(
+                self._action_normalization,  # type: ignore[arg-type]
+                stats_path=self.stats_path(),
+                apply_forward_clamp=False,
+                expected_dim=self.action_dim,
+            )
+        return self._action_normalizer
+
+    def normalize(self, action: torch.Tensor) -> torch.Tensor:
+        """Raw action -> model space, using this dataset's normalization method and stats."""
+        if self._action_normalization is None:
+            return action
+        if self._action_normalization in LEGACY_NORMALIZATION_METHODS:
+            return normalize_action(action, self._action_normalization, self._load_norm_stats())
+        return self._resolve_action_normalizer().normalize_action(action)
+
+    def denormalize(self, action: torch.Tensor) -> torch.Tensor:
+        """Model-space action -> raw action (inverse of :meth:`normalize`)."""
+        if self._action_normalization is None:
+            return action
+        if self._action_normalization in LEGACY_NORMALIZATION_METHODS:
+            return denormalize_action(action, self._action_normalization, self._load_norm_stats())
+        return self._resolve_action_normalizer().denormalize_action(action)
+
     @abstractmethod
     def __getitem__(self, idx: int) -> dict[str, Any]: ...
 
     def _compute_idle_frames(self, action: torch.Tensor) -> int:
+        # Idle detection is defined on framewise one-step deltas. The anchored recipes (Cosmos3-Nano-HumanAction)
+        # were trained without idle-frame annotations, so report none rather than misread anchored rows.
+        if self._pose_convention != "backward_framewise":
+            return 0
         return compute_idle_frames(
             action,
             self._action_spec(),
@@ -181,7 +233,9 @@ class ActionBaseDataset(ABC, Dataset):
 
     def _load_norm_stats(self) -> dict[str, torch.Tensor]:
         if self._norm_stats is None:
-            self._norm_stats = self.load_action_stats()
+            self._norm_stats = {
+                key: torch.from_numpy(value).float() for key, value in load_action_stats(str(self.stats_path())).items()
+            }
         return self._norm_stats
 
     def _build_result(
@@ -195,10 +249,7 @@ class ActionBaseDataset(ABC, Dataset):
     ) -> dict[str, Any]:
         idle_frames = self._compute_idle_frames(action)
         # action_normalization=None -> use raw actions (no normalization), e.g. joint_pos.
-        if self.action_normalization is None:
-            normalized_action = action
-        else:
-            normalized_action = normalize_action(action, self.action_normalization, self._load_norm_stats())
+        normalized_action = self.normalize(action)
         formatted_video = (video * 255.0).clamp(0.0, 255.0).to(torch.uint8).permute(1, 0, 2, 3)
         return {
             "ai_caption": ai_caption,

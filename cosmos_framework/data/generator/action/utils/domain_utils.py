@@ -72,6 +72,7 @@ EMBODIMENT_TO_RAW_ACTION_DIM: dict[str, int] = {
     "embodiment_c_gripper": 29,
     "embodiment_c_gripper_ext": 29,
     "webhumanaction_body": 57,  # ego/head(9) + [R_wrist(9)+R_fingertips(15)] + [L_wrist(9)+L_fingertips(15)]
+    "webhumanaction_hand": 48,  # [R_wrist(9)+R_fingertips(15)] + [L_wrist(9)+L_fingertips(15)], no camera block
     "xdof_yam": 20,
     "molmoact2_yam": 20,
     "abc_yam": 20,
