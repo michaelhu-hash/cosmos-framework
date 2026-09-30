@@ -39,6 +39,12 @@ _TYPE_ALIASES = {
     "projects.cosmos3.vfm.configs.base.defaults.model_config.OmniMoTModelConfig": "omni_mot_model_config",
     "projects.cosmos3.vfm.configs.base.defaults.model_config.RectifiedFlowInferenceConfig": "rectified_flow_inference_config",
     "projects.cosmos3.vfm.configs.base.defaults.model_config.RectifiedFlowTrainingConfig": "rectified_flow_training_config",
+    # Multiview / flex attention block of OmniMoTModelConfig. Exported checkpoints alias it as
+    # ``flex_attention_config`` (the name the block had when the aliases were minted); without these
+    # entries convert_model_to_dcp rejects every checkpoint whose config carries the (default, disabled)
+    # block, e.g. Cosmos3-Nano-HumanAction.
+    "projects.cosmos3.vfm.configs.base.defaults.multiview_attention.MultiviewAttentionConfig": "flex_attention_config",
+    "projects.cosmos3.vfm.configs.base.defaults.multiview_attention.MultiviewAttentionMaskConfig": "flex_attention_mask_config",
     "projects.cosmos3.vfm.configs.base.defaults.parallelism.ParallelismConfig": "parallelism_config",
     "projects.cosmos3.vfm.configs.base.defaults.quantization.QuantizationConfig": "quantization_config",
     "projects.cosmos3.vfm.configs.base.defaults.vlm.PretrainedWeightsConfig": "pretrained_weights_config",

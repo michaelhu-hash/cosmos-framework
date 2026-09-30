@@ -76,3 +76,30 @@ def test_public_model_config_round_trip_removes_internal_metadata():
     assert restored == model_config
     assert load_model_config_from_hf_config({"model": public_model_config}) == model_config
     assert load_model_config_from_hf_config({"model": model_config}) == model_config
+
+
+def test_multiview_attention_aliases_round_trip_through_build_public_model_config() -> None:
+    """Exported HumanAction checkpoints carry ``multiview_attention`` as ``flex_attention_config`` /
+    ``flex_attention_mask_config``; the registry must map the block both ways so ``convert_model_to_dcp``
+    accepts them."""
+    from cosmos_framework.inference.common import public_model_config as m
+
+    runtime = {
+        "_target_": "cosmos_framework.model.generator.omni_mot_model.OmniMoTModel",
+        "config": {
+            "_type": "cosmos_framework.configs.base.defaults.model_config.OmniMoTModelConfig",
+            "multiview_attention": {
+                "_type": "cosmos_framework.configs.base.defaults.multiview_attention.MultiviewAttentionConfig",
+                "backend": "sdpa",
+                "mask": {
+                    "_type": "cosmos_framework.configs.base.defaults.multiview_attention.MultiviewAttentionMaskConfig",
+                },
+            },
+        },
+    }
+    public = m.build_public_model_config(runtime)
+    block = public["config"]["multiview_attention"]
+    assert block["_type"] == "flex_attention_config" and block["mask"]["_type"] == "flex_attention_mask_config"
+    assert m.model_config_uses_public_aliases(public)
+    restored = m.restore_model_config_from_public_model_config(public)
+    assert restored["config"]["multiview_attention"] == runtime["config"]["multiview_attention"]
