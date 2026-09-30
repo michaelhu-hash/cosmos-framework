@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import random
 from abc import ABC, abstractmethod
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,89 @@ SUPPORTED_POSE_CONVENTIONS = ("backward_framewise", *ANCHORED_POSE_CONVENTIONS)
 # row 0 and the normalizer routes it to dedicated a0 stats. Forward dynamics never carries a0.
 INITIAL_STATE_MODES = ("predict",)
 INITIAL_STATE_ACTION_MODES = ("inverse_dynamics", "wam")
+SPLIT_CHOICES = ("full", "train", "val")
+# Snapped windows must be 1 + 4N video frames (tokenizer temporal compression) and at least 5 frames.
+_SNAP_FRAME_GROUP = 4
+_SNAP_MIN_FRAMES = 5
+
+
+def split_episode_ids(total_episodes: int, seed: int, val_ratio: float, split: str) -> list[int]:
+    """Deterministic episode POSITIONS for a train / val / full split (same rule as the DROID readers).
+
+    ``round(total * val_ratio)`` episodes of a seeded permutation form the val split; the rest train.
+    """
+    if split not in SPLIT_CHOICES:
+        raise ValueError(f"split must be one of {SPLIT_CHOICES}, got {split!r}")
+    if not 0.0 <= val_ratio < 1.0:
+        raise ValueError(f"val_ratio must be in [0, 1), got {val_ratio}")
+    num_val = int(round(total_episodes * val_ratio))
+    order = torch.randperm(total_episodes, generator=torch.Generator().manual_seed(seed)).tolist()
+    if split == "train":
+        return order[num_val:]
+    if split == "val":
+        return order[:num_val]
+    return order
+
+
+def snapped_num_frames(native_rows: int, source_stride: int, chunk_length: int) -> int:
+    """Video frames of a subtask-snapped window: ``min(rows // stride, chunk_length + 1)`` rounded down to ``1 + 4N``;
+    0 when the subtask is shorter than 5 frames (mirrors the internal ``HandPoseDataset`` snap rule)."""
+    frames = min(native_rows // source_stride, chunk_length + 1)
+    if frames < _SNAP_MIN_FRAMES:
+        return 0
+    return 1 + _SNAP_FRAME_GROUP * ((frames - 1) // _SNAP_FRAME_GROUP)
+
+
+def build_window_index(
+    episode_ids: Sequence[int],
+    *,
+    source_stride: int,
+    chunk_length: int,
+    sample_stride: int = 1,
+    keep_episodes: Collection[int] | None = None,
+    snap_to_subtask: bool = False,
+    subtask_ids: Sequence[int] | None = None,
+) -> list[tuple[int, int]]:
+    """``(start_row, num_steps)`` windows over a flat, index-sorted row table whose episodes are contiguous.
+
+    Dense (default): every start (step ``sample_stride``) whose ``source_stride * chunk_length + 1`` rows stay
+    inside the episode; every window has ``chunk_length`` steps.
+    ``snap_to_subtask``: ONE window per subtask (uniform sampling over subtasks instead of a bias toward long
+    ones), starting at the subtask's first row, ``snapped_num_frames(...) - 1`` steps long, i.e. variable length
+    up to ``chunk_length``; subtasks shorter than 5 frames are dropped. ``subtask_ids`` is the per-row
+    ``subtask_index`` column. ``keep_episodes`` restricts to a split.
+    """
+    if snap_to_subtask and subtask_ids is None:
+        raise ValueError("snap_to_subtask needs the per-row subtask_ids column")
+    windows: list[tuple[int, int]] = []
+    num_rows = len(episode_ids)
+    episode_start = 0
+    while episode_start < num_rows:
+        episode = int(episode_ids[episode_start])
+        episode_end = episode_start + 1
+        while episode_end < num_rows and int(episode_ids[episode_end]) == episode:
+            episode_end += 1
+        if keep_episodes is None or episode in keep_episodes:
+            if not snap_to_subtask:
+                required_source_steps = source_stride * chunk_length
+                windows.extend(
+                    (start, chunk_length)
+                    for start in range(
+                        episode_start, max(episode_start, episode_end - required_source_steps), sample_stride
+                    )
+                )
+            else:
+                assert subtask_ids is not None
+                starts = [episode_start] + [
+                    row for row in range(episode_start + 1, episode_end) if subtask_ids[row] != subtask_ids[row - 1]
+                ]
+                for i, row_start in enumerate(starts):
+                    native_rows = (starts[i + 1] if i + 1 < len(starts) else episode_end) - row_start
+                    frames = snapped_num_frames(native_rows, source_stride, chunk_length)
+                    if frames > 0:
+                        windows.append((row_start, frames - 1))
+        episode_start = episode_end
+    return windows
 
 
 class ActionBaseDataset(ABC, Dataset):
@@ -66,6 +150,10 @@ class ActionBaseDataset(ABC, Dataset):
         stats_path: str | Path | None = None,
         initial_state: str | None = None,
         initial_state_stats_path: str | Path | None = None,
+        split: str = "full",
+        val_ratio: float = 0.0,
+        split_seed: int = 42,
+        snap_to_subtask: bool = False,
     ) -> None:
         super().__init__()
         if pose_convention not in SUPPORTED_POSE_CONVENTIONS:
@@ -103,6 +191,18 @@ class ActionBaseDataset(ABC, Dataset):
             Path(initial_state_stats_path) if initial_state_stats_path is not None else None
         )
         self._initial_state_normalizer: ActionNormalizer | None = None
+        if split not in SPLIT_CHOICES:
+            raise ValueError(f"split must be one of {SPLIT_CHOICES}, got {split!r}")
+        if split == "val" and val_ratio <= 0.0:
+            raise ValueError("split='val' needs val_ratio > 0")
+        self._split = split
+        self._val_ratio = float(val_ratio)
+        self._split_seed = int(split_seed)
+        self._snap_to_subtask = bool(snap_to_subtask)
+        # Set by _init_window_index(): (start_row, num_steps) per window + the episode of each window.
+        self._windows: list[tuple[int, int]] | None = None
+        self._window_episode_ids: list[int] = []
+        self._source_stride: int = 1
 
         self._root = Path(root)
         self._info = json.loads((self._root / "meta" / "info.json").read_text())
@@ -150,6 +250,60 @@ class ActionBaseDataset(ABC, Dataset):
     @property
     def domain_id(self) -> int:
         return self._domain_id
+
+    @property
+    def split(self) -> str:
+        return self._split
+
+    @property
+    def snap_to_subtask(self) -> bool:
+        return self._snap_to_subtask
+
+    def _init_window_index(self, *, source_stride: int) -> None:
+        """Build the window index over ``self._rows`` from the split / snap settings (call once from ``__init__``)."""
+        rows = self._rows
+        episode_ids = [int(row["episode_index"]) for row in rows]
+        keep: set[int] | None = None
+        if self._split != "full" or self._val_ratio > 0.0:
+            unique = sorted(set(episode_ids))
+            keep = {
+                unique[pos] for pos in split_episode_ids(len(unique), self._split_seed, self._val_ratio, self._split)
+            }
+        subtask_ids = [int(row.get("subtask_index", -1)) for row in rows] if self._snap_to_subtask else None
+        self._source_stride = int(source_stride)
+        self._windows = build_window_index(
+            episode_ids,
+            source_stride=self._source_stride,
+            chunk_length=self._chunk_length,
+            sample_stride=self._sample_stride,
+            keep_episodes=keep,
+            snap_to_subtask=self._snap_to_subtask,
+            subtask_ids=subtask_ids,
+        )
+        self._window_episode_ids = [episode_ids[start] for start, _ in self._windows]
+
+    def _window_rows(self, idx: int) -> list[dict[str, Any]]:
+        """Rows of window ``idx`` at the target fps: ``num_steps + 1`` frames, never crossing an episode."""
+        if self._windows is None:
+            raise RuntimeError(f"{type(self).__name__} did not call _init_window_index()")
+        start, num_steps = self._windows[int(idx)]
+        rows = self._rows[start : start + self._source_stride * num_steps + 1 : self._source_stride]
+        if len(rows) != num_steps + 1:
+            raise IndexError(f"Incomplete window at index {idx}.")
+        episode_index = int(rows[0]["episode_index"])
+        if any(int(row["episode_index"]) != episode_index for row in rows):
+            raise IndexError(f"Window at index {idx} crosses an episode boundary.")
+        return rows
+
+    def get_shuffle_blocks(self) -> list[tuple[int, int]]:
+        """Per-episode ``(first_window, count)`` blocks for ``ActionIterableShuffleDataset``."""
+        blocks: list[tuple[int, int]] = []
+        for i, episode in enumerate(self._window_episode_ids):
+            if blocks and self._window_episode_ids[blocks[-1][0]] == episode:
+                blocks[-1] = (blocks[-1][0], blocks[-1][1] + 1)
+            else:
+                blocks.append((i, 1))
+        return blocks
 
     @property
     def initial_state(self) -> str | None:

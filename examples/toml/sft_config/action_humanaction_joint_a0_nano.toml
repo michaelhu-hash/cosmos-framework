@@ -1,0 +1,34 @@
+# Cosmos3-Nano-HumanAction joint post-training with the Image2Action frame-0 row a0 (Action100M hands + body, Mecka hands).
+# Scalar knobs only; the dataset / action recipe lives in the registered experiment
+# (cosmos_framework/configs/base/experiment/action/posttrain_config/action_humanaction_joint_nano.py).
+[job]
+task       = "vfm"
+experiment = "action_humanaction_joint_a0_nano"
+project    = "cosmos3_action_humanaction"
+group      = "action_sft"
+name       = "action_humanaction_joint_a0_nano"
+wandb_mode = "online"
+
+[model]
+precision = "bfloat16"
+
+[model.parallelism]
+data_parallel_shard_degree     = 8
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode = "selective"
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[scheduler]
+cycle_lengths = [25000]
+
+[trainer]
+max_iter     = 25000
+logging_iter = 50
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 250

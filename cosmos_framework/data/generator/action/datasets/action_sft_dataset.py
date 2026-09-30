@@ -21,10 +21,18 @@ from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
 from cosmos_framework.data.generator.action.datasets.droid_lerobot_dataset import DROIDLeRobotDataset
 from cosmos_framework.data.generator.action.datasets.droid_merged_lerobot_dataset import DROIDMergedLeRobotDataset
+from cosmos_framework.data.generator.action.datasets.human_hand_pose_lerobot_dataset import (
+    HUMANACTION_NORMALIZER_PATH,
+    HumanHandPoseLeRobotDataset,
+)
 from cosmos_framework.data.generator.action.datasets.libero_lerobot_dataset import LIBEROLeRobotDataset
 from cosmos_framework.data.generator.action.datasets.robocasa_lerobot_dataset import (
     DEFAULT_ALL_ATOMIC_TASKS,
     RoboCasaLeRobotDataset,
+)
+from cosmos_framework.data.generator.action.datasets.webhumanaction_lerobot_dataset import (
+    WebHumanActionBodyLeRobotDataset,
+    WebHumanActionHandLeRobotDataset,
 )
 from cosmos_framework.data.generator.action.utils.transforms import ActionTransformPipeline
 
@@ -302,6 +310,7 @@ def get_action_robocasa_sft_dataset(
         return ActionIterableShuffleDataset(sft, seed=episode_shuffle_seed)
     return sft
 
+
 def get_action_libero_sft_dataset(
     *,
     root: str,
@@ -371,3 +380,225 @@ def get_action_libero_sft_dataset(
     if iterable_shuffle:
         return ActionIterableShuffleDataset(sft, seed=episode_shuffle_seed)
     return sft
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Cosmos3-Nano-HumanAction (Action100M hands / body, Mecka hands)
+# ---------------------------------------------------------------------------------------------------------------------
+def _humanaction_sft(
+    dataset: Dataset,
+    *,
+    resolution: str | int,
+    max_action_dim: int,
+    tokenizer_config: dict | None,
+    cfg_dropout_rate: float,
+    append_viewpoint_info: bool,
+    append_duration_fps_timestamps: bool,
+    append_resolution_info: bool,
+    append_idle_frames: bool,
+    format_prompt_as_json: bool,
+    iterable_shuffle: bool,
+    episode_shuffle_seed: int,
+) -> Dataset:
+    transform = ActionTransformPipeline(
+        tokenizer_config=tokenizer_config,
+        cfg_dropout_rate=cfg_dropout_rate,
+        max_action_dim=max_action_dim,
+        append_viewpoint_info=append_viewpoint_info,
+        append_duration_fps_timestamps=append_duration_fps_timestamps,
+        append_resolution_info=append_resolution_info,
+        append_idle_frames=append_idle_frames,
+        format_prompt_as_json=format_prompt_as_json,
+    )
+    sft = ActionSFTDataset(dataset, transform, resolution)
+    if iterable_shuffle:
+        return ActionIterableShuffleDataset(sft, seed=episode_shuffle_seed)
+    return sft
+
+
+def get_action_webhumanaction_hand_sft_dataset(
+    *,
+    root: str,
+    fps: float = 15.0,
+    chunk_length: int = 72,
+    mode: str = "joint",
+    pose_convention: str = "backward_chunk_anchored_16f",
+    action_normalization: str | None = "piecewise_asinh_rot",
+    stats_path: str | None = None,
+    initial_state: str | None = None,
+    initial_state_stats_path: str | None = None,
+    split: str = "full",
+    val_ratio: float = 0.0,
+    split_seed: int = 42,
+    snap_to_subtask: bool = False,
+    sample_stride: int = 1,
+    resolution: str | int = "480",
+    max_action_dim: int = 64,
+    tokenizer_config: dict | None = None,
+    cfg_dropout_rate: float = 0.1,
+    append_viewpoint_info: bool = True,
+    append_duration_fps_timestamps: bool = True,
+    append_resolution_info: bool = True,
+    append_idle_frames: bool = True,
+    format_prompt_as_json: bool = True,
+    iterable_shuffle: bool = True,
+    episode_shuffle_seed: int = 42,
+) -> Dataset:
+    """Action100M hands (``webhumanaction_hand``, 48D) SFT dataset with the HumanAction recipe defaults
+    (15 fps, 72-step chunks, chunk-anchored rot6d deltas, piecewise-asinh normalization, JSON prompts).
+    ``mode="joint"`` draws forward_dynamics / inverse_dynamics / wam per sample like the released joint recipe;
+    ``initial_state="predict"`` trains the Image2Action a0 row."""
+    dataset = WebHumanActionHandLeRobotDataset(
+        root,
+        fps=fps,
+        chunk_length=chunk_length,
+        mode=mode,
+        pose_convention=pose_convention,  # type: ignore[arg-type]
+        action_normalization=action_normalization,
+        stats_path=stats_path,
+        initial_state=initial_state,  # type: ignore[arg-type]
+        initial_state_stats_path=initial_state_stats_path,
+        split=split,
+        val_ratio=val_ratio,
+        split_seed=split_seed,
+        snap_to_subtask=snap_to_subtask,
+        sample_stride=sample_stride,
+    )
+    return _humanaction_sft(
+        dataset,
+        resolution=resolution,
+        max_action_dim=max_action_dim,
+        tokenizer_config=tokenizer_config,
+        cfg_dropout_rate=cfg_dropout_rate,
+        append_viewpoint_info=append_viewpoint_info,
+        append_duration_fps_timestamps=append_duration_fps_timestamps,
+        append_resolution_info=append_resolution_info,
+        append_idle_frames=append_idle_frames,
+        format_prompt_as_json=format_prompt_as_json,
+        iterable_shuffle=iterable_shuffle,
+        episode_shuffle_seed=episode_shuffle_seed,
+    )
+
+
+def get_action_webhumanaction_body_sft_dataset(
+    *,
+    root: str,
+    fps: float = 15.0,
+    chunk_length: int = 72,
+    mode: str = "joint",
+    pose_convention: str = "backward_chunk_anchored_16f",
+    action_normalization: str | None = "piecewise_asinh_rot",
+    stats_path: str | None = None,
+    initial_state: str | None = None,
+    initial_state_stats_path: str | None = None,
+    split: str = "full",
+    val_ratio: float = 0.0,
+    split_seed: int = 42,
+    snap_to_subtask: bool = False,
+    sample_stride: int = 1,
+    resolution: str | int = "480",
+    max_action_dim: int = 64,
+    tokenizer_config: dict | None = None,
+    cfg_dropout_rate: float = 0.1,
+    append_viewpoint_info: bool = True,
+    append_duration_fps_timestamps: bool = True,
+    append_resolution_info: bool = True,
+    append_idle_frames: bool = True,
+    format_prompt_as_json: bool = True,
+    iterable_shuffle: bool = True,
+    episode_shuffle_seed: int = 42,
+) -> Dataset:
+    """Action100M body (``webhumanaction_body``, 57D head + hands) SFT dataset; see the hand factory."""
+    dataset = WebHumanActionBodyLeRobotDataset(
+        root,
+        fps=fps,
+        chunk_length=chunk_length,
+        mode=mode,
+        pose_convention=pose_convention,  # type: ignore[arg-type]
+        action_normalization=action_normalization,
+        stats_path=stats_path,
+        initial_state=initial_state,  # type: ignore[arg-type]
+        initial_state_stats_path=initial_state_stats_path,
+        split=split,
+        val_ratio=val_ratio,
+        split_seed=split_seed,
+        snap_to_subtask=snap_to_subtask,
+        sample_stride=sample_stride,
+    )
+    return _humanaction_sft(
+        dataset,
+        resolution=resolution,
+        max_action_dim=max_action_dim,
+        tokenizer_config=tokenizer_config,
+        cfg_dropout_rate=cfg_dropout_rate,
+        append_viewpoint_info=append_viewpoint_info,
+        append_duration_fps_timestamps=append_duration_fps_timestamps,
+        append_resolution_info=append_resolution_info,
+        append_idle_frames=append_idle_frames,
+        format_prompt_as_json=format_prompt_as_json,
+        iterable_shuffle=iterable_shuffle,
+        episode_shuffle_seed=episode_shuffle_seed,
+    )
+
+
+def get_action_human_hand_pose_sft_dataset(
+    *,
+    root: str,
+    fps: float = 15.0,
+    chunk_length: int = 72,
+    mode: str = "joint",
+    pose_convention: str = "backward_chunk_anchored_16f",
+    action_normalization: str | None = "piecewise_asinh_rot",
+    stats_path: str | None = str(HUMANACTION_NORMALIZER_PATH),
+    initial_state: str | None = None,
+    initial_state_stats_path: str | None = None,
+    split: str = "full",
+    val_ratio: float = 0.0,
+    split_seed: int = 42,
+    snap_to_subtask: bool = True,
+    sample_stride: int = 1,
+    resolution: str | int = "480",
+    max_action_dim: int = 64,
+    tokenizer_config: dict | None = None,
+    cfg_dropout_rate: float = 0.1,
+    append_viewpoint_info: bool = True,
+    append_duration_fps_timestamps: bool = True,
+    append_resolution_info: bool = True,
+    append_idle_frames: bool = True,
+    format_prompt_as_json: bool = True,
+    iterable_shuffle: bool = True,
+    episode_shuffle_seed: int = 42,
+) -> Dataset:
+    """Mecka hands (``hand_pose``, 57D camera + hands) SFT dataset with the HumanAction recipe defaults. The
+    base-Nano reader defaults (16-step framewise chunks, quantile stats) are overridden here; ``snap_to_subtask``
+    is on like the released recipe (one window per subtask)."""
+    dataset = HumanHandPoseLeRobotDataset(
+        root,
+        fps=fps,
+        chunk_length=chunk_length,
+        mode=mode,
+        pose_convention=pose_convention,  # type: ignore[arg-type]
+        action_normalization=action_normalization,
+        stats_path=stats_path,
+        initial_state=initial_state,  # type: ignore[arg-type]
+        initial_state_stats_path=initial_state_stats_path,
+        split=split,
+        val_ratio=val_ratio,
+        split_seed=split_seed,
+        snap_to_subtask=snap_to_subtask,
+        sample_stride=sample_stride,
+    )
+    return _humanaction_sft(
+        dataset,
+        resolution=resolution,
+        max_action_dim=max_action_dim,
+        tokenizer_config=tokenizer_config,
+        cfg_dropout_rate=cfg_dropout_rate,
+        append_viewpoint_info=append_viewpoint_info,
+        append_duration_fps_timestamps=append_duration_fps_timestamps,
+        append_resolution_info=append_resolution_info,
+        append_idle_frames=append_idle_frames,
+        format_prompt_as_json=format_prompt_as_json,
+        iterable_shuffle=iterable_shuffle,
+        episode_shuffle_seed=episode_shuffle_seed,
+    )

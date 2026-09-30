@@ -101,6 +101,10 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
         stats_path: str | Path | None = None,
         initial_state: Literal["predict"] | None = None,
         initial_state_stats_path: str | Path | None = None,
+        split: str = "full",
+        val_ratio: float = 0.0,
+        split_seed: int = 42,
+        snap_to_subtask: bool = False,
     ) -> None:
         if viewpoint != "ego_view":
             raise NotImplementedError("Human hand-pose data only supports ego_view.")
@@ -122,25 +126,19 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
             stats_path=stats_path,
             initial_state=initial_state,
             initial_state_stats_path=initial_state_stats_path,
+            split=split,
+            val_ratio=val_ratio,
+            split_seed=split_seed,
+            snap_to_subtask=snap_to_subtask,
         )
         source_fps = float(self._info["fps"])
         source_stride = source_fps / self._fps
         if not source_stride.is_integer():
             raise ValueError(f"Source FPS {source_fps} must be an integer multiple of target FPS {self._fps}.")
-        self._source_stride = int(source_stride)
         self._image_key = image_key
-        required_source_steps = self._source_stride * self._chunk_length
-        self._valid_starts: list[int] = []
-        episode_start = 0
-        while episode_start < len(self._rows):
-            episode_index = int(self._rows[episode_start]["episode_index"])
-            episode_end = episode_start + 1
-            while episode_end < len(self._rows) and int(self._rows[episode_end]["episode_index"]) == episode_index:
-                episode_end += 1
-            self._valid_starts.extend(
-                range(episode_start, max(episode_start, episode_end - required_source_steps), self._sample_stride)
-            )
-            episode_start = episode_end
+        # Window index: dense sliding windows, or one variable-length window per subtask (snap_to_subtask),
+        # restricted to the train / val split. See ActionBaseDataset._init_window_index.
+        self._init_window_index(source_stride=int(source_stride))
         subtasks_path = self._root / "meta" / "subtasks.parquet"
         self._subtasks = (
             {int(row["subtask_index"]): str(row["subtask"]) for row in pq.read_table(subtasks_path).to_pylist()}
@@ -173,19 +171,12 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
         return HUMANACTION_INITIAL_STATE_NORMALIZER_PATH
 
     def __len__(self) -> int:
-        return len(self._valid_starts)
+        return len(self._windows or [])
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         mode = self._choose_mode()
-        start = self._valid_starts[int(idx)]
-        stop = start + self._source_stride * self._chunk_length + 1
-        rows = self._rows[start : stop : self._source_stride]
-        if len(rows) != self._chunk_length + 1:
-            raise IndexError(f"Incomplete hand-pose window at index {idx}.")
+        rows = self._window_rows(idx)
         episode_index = int(rows[0]["episode_index"])
-        if any(int(row["episode_index"]) != episode_index for row in rows):
-            raise IndexError(f"Hand-pose window at index {idx} crosses an episode boundary.")
-
         episode = self._episodes[episode_index]
         video = self._load_video(episode, rows)
         include_initial_state = self.wants_initial_state(mode)
@@ -273,7 +264,7 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
                 ),
             )
             action = np.concatenate([encode_initial_state_row(HAND_POSE_LAYOUT, anchors)[None], action], axis=0)
-        expected_rows = self._chunk_length + int(include_initial_state)
+        expected_rows = len(rows) - 1 + int(include_initial_state)  # snapped windows can be shorter than chunk_length
         if action.shape != (expected_rows, _RAW_ACTION_DIM):
             raise ValueError(f"Expected hand-pose action shape {(expected_rows, _RAW_ACTION_DIM)}, got {action.shape}.")
         return torch.from_numpy(action).float()

@@ -174,6 +174,7 @@ LIBERO (`frame_wise_relative` rot6d 10-D actions), both from Cosmos3-Nano. They 
 
 - [DROID action policy](./action_policy_droid_posttrain.md) —
   `examples/launch_sft_action_policy_droid_nano.sh`
+- [HumanAction (Action100M hands / body, Mecka hands, joint FD / ID / wam, optional Image2Action a0)](./action_humanaction_posttrain.md)
 - [LIBERO action policy](./action_policy_libero_posttrain.md) —
   `examples/launch_sft_action_policy_libero_10_nano.sh` / `examples/launch_sft_action_policy_libero_all_nano.sh`
 
