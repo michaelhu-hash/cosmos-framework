@@ -1504,6 +1504,14 @@ class OmniMoTModel(ImaginaireModel):
             memory=memory,
         )
 
+        # Frame-0 initial-state rows (Image2Action): dense over action-bearing samples, in the
+        # same order as ``out_net["preds_action"]``. The a0 row sits right after the history
+        # block, i.e. at index ``len(condition_frame_indexes_action)``.
+        action_initial_state_rows = [
+            len(plan.condition_frame_indexes_action) if plan.predict_initial_state else None
+            for plan in sequence_plans
+            if plan.has_action
+        ]
         loss, losses_dict = self._compute_losses(
             out_net=out_net,
             data_batch_packed=packed_sequence,
@@ -1513,6 +1521,7 @@ class OmniMoTModel(ImaginaireModel):
             timesteps_action=timesteps_action,
             timesteps_sound=timesteps_sound,
             timesteps_lidar=timesteps_lidar,
+            action_initial_state_rows=action_initial_state_rows,
         )
 
         _vision_tokens = len(packed_sequence.vision.sequence_indexes) if packed_sequence.vision else 0
@@ -1685,8 +1694,14 @@ class OmniMoTModel(ImaginaireModel):
         timesteps_action: torch.Tensor | None = None,
         timesteps_sound: torch.Tensor | None = None,
         timesteps_lidar: torch.Tensor | None = None,
+        action_initial_state_rows: list[int | None] | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute flow matching loss and auxiliary load balancing losses.
+
+        ``action_initial_state_rows`` (dense over action samples, matching
+        ``out_net["preds_action"]``) gives the row index of the frame-0 initial-state row a0
+        for samples that carry one (``None`` otherwise); that row is upweighted by
+        ``rectified_flow_training_config.action_initial_state_loss_weight``.
 
         ``timesteps_action`` is an optional ``[n_action, 1]`` override for the action loss
         time-weighting — dense over action-bearing samples, matching ``data_batch_packed.action.*``.
@@ -1800,6 +1815,23 @@ class OmniMoTModel(ImaginaireModel):
                     sample_loss=slot_stat_zeros,
                     sample_count=torch.zeros_like(slot_stat_zeros),
                 )
+                # Frame-0 initial-state row a0: optional per-row upweighting (Image2Action).
+                _a0_weight = float(rf_cfg.action_initial_state_loss_weight)
+                _a0_rows = action_initial_state_rows if action_initial_state_rows is not None else []
+                _a0_row_weights: list[torch.Tensor | None] | None = None
+                if _a0_weight != 1.0 and any(r is not None for r in _a0_rows):
+                    if len(_a0_rows) != num_action_samples:
+                        raise ValueError(
+                            f"action_initial_state_rows has {len(_a0_rows)} entries for {num_action_samples} action samples"
+                        )
+                    _a0_row_weights = []
+                    for pred_i, a0_row in zip(out_net["preds_action"], _a0_rows):
+                        if a0_row is None:
+                            _a0_row_weights.append(None)
+                            continue
+                        rw = torch.ones((pred_i.shape[0], 1), device=pred_i.device, dtype=torch.float32)  # [T,1]
+                        rw[a0_row, 0] = _a0_weight
+                        _a0_row_weights.append(rw)
                 fm_loss_action, _ = compute_flow_matching_loss(
                     pred=out_net["preds_action"],
                     target=gen_data_noised.vt_target_action,
@@ -1812,7 +1844,21 @@ class OmniMoTModel(ImaginaireModel):
                     action_valid_mask=data_batch_packed.action.action_valid_mask,
                     normalize_by_active=normalize_by_active,
                     action_slot_stats=action_slot_stats,
+                    row_weights=_a0_row_weights,
                 )
+                # Monitoring only: unweighted mean squared error on the a0 rows (raw dims), detached.
+                _raw_dims = data_batch_packed.action.raw_action_dim  # list[Tensor | None] | None
+                _a0_terms = []
+                for _j, (pred_i, tgt_i, a0_row) in enumerate(
+                    zip(out_net["preds_action"], gen_data_noised.vt_target_action, _a0_rows)
+                ):
+                    if a0_row is None:
+                        continue
+                    _rad = _raw_dims[_j] if _raw_dims is not None else None
+                    _d = int(_rad) if _rad is not None else pred_i.shape[-1]
+                    _a0_terms.append(((pred_i.float() - tgt_i.float())[a0_row, :_d] ** 2).mean().detach())
+                if _a0_terms:
+                    losses_dict["flow_matching_loss_action_initial_state"] = torch.stack(_a0_terms).mean()
 
                 # Yihuai: In case the video loss is too large (1.5) and covers the action loss (0.05), we scale up the action loss to match the video loss to improve action precision.
                 total_loss += fm_loss_action * rf_cfg.action_loss_weight

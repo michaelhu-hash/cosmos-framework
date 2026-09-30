@@ -45,6 +45,7 @@ def compute_flow_matching_loss(
     normalize_by_active: bool = False,
     exclude_fully_conditioned_items: bool = False,
     action_slot_stats: ActionSlotLossStats | None = None,
+    row_weights: list[torch.Tensor | None] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute flow matching loss for a modality.
 
@@ -76,6 +77,10 @@ def compute_flow_matching_loss(
             samples from diluting the generated target loss.
         action_slot_stats: Optional collector for detached normalized per-sample
             losses over the canonical unified Action slots.
+        row_weights: Optional per-sample ``[T,1]`` multipliers on the squared error
+            (``None`` entries = no weighting). Used to upweight the frame-0 initial-state
+            action row. Applied before the slot mask; denominators are unchanged, so a
+            weight of ``w`` scales that row's contribution by exactly ``w``.
 
     Returns:
         tuple: A tuple containing two elements:
@@ -95,6 +100,11 @@ def compute_flow_matching_loss(
     for i in range(len(pred)):
         T_i = condition_mask[i].shape[0]
         sqerr_i = (pred[i] - target[i]) ** 2  # vision:[C,T,H,W]  action/sound:[T,D]
+        if row_weights is not None and row_weights[i] is not None:
+            rw_i = row_weights[i].to(dtype=sqerr_i.dtype, device=sqerr_i.device)  # [T,1]
+            if rw_i.shape[0] != sqerr_i.shape[0]:
+                raise ValueError(f"row_weights[{i}] has {rw_i.shape[0]} rows, action has {sqerr_i.shape[0]}")
+            sqerr_i = sqerr_i * rw_i  # [T,D]
         noisy_mask_i = 1.0 - condition_mask[i]  # vision:[T,1,1]  action/sound:[T,1]
         has_noisy_items.append(torch.any(noisy_mask_i != 0))  # []
         if raw_action_dim is not None and raw_action_dim[i] is not None:

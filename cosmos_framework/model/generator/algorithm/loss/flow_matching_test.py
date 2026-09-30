@@ -201,3 +201,38 @@ def test_excluding_all_fully_conditioned_items_returns_differentiable_zero() -> 
     torch.testing.assert_close(per_instance, torch.tensor([0.0]))
     weighted.backward()
     torch.testing.assert_close(pred_item.grad, torch.zeros_like(pred_item))
+
+
+@pytest.mark.L0
+def test_row_weights_scale_only_the_selected_row() -> None:
+    """Frame-0 initial-state row upweighting: row 0 x w, denominators unchanged, None = no-op."""
+    pred = [torch.tensor([[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]]), torch.ones(3, 2)]
+    target = [torch.zeros(3, 2), torch.zeros(3, 2)]
+    condition_mask = [torch.zeros(3, 1), torch.zeros(3, 1)]
+    row_weights = [torch.tensor([[10.0], [1.0], [1.0]]), None]
+
+    weighted, per_instance = compute_flow_matching_loss(
+        pred=pred,
+        target=target,
+        condition_mask=condition_mask,
+        timesteps=torch.zeros(2, 1),
+        has_valid_tokens=True,
+        rectified_flow=_UnitWeightFlow(),
+        tensor_kwargs_fp32={"dtype": torch.float32},
+        row_weights=row_weights,
+    )
+    # sample 0: (10*2 + 2 + 2) / 6 = 4 ; sample 1: plain mean = 1
+    torch.testing.assert_close(per_instance, torch.tensor([4.0, 1.0]))
+    torch.testing.assert_close(weighted, torch.tensor(2.5))
+
+    with pytest.raises(ValueError, match="row_weights"):
+        compute_flow_matching_loss(
+            pred=pred[:1],
+            target=target[:1],
+            condition_mask=condition_mask[:1],
+            timesteps=torch.zeros(1, 1),
+            has_valid_tokens=True,
+            rectified_flow=_UnitWeightFlow(),
+            tensor_kwargs_fp32={"dtype": torch.float32},
+            row_weights=[torch.ones(2, 1)],
+        )

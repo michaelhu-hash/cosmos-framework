@@ -87,6 +87,11 @@ class RectifiedFlowTrainingConfig:
     # user: please adjust this value according to loss_scale to balance the action loss with the video loss.
     # default is 10.0 to align with previous training settings.
     action_loss_weight: float = 10.0
+    # Loss weight for the frame-0 initial-state action row a0 (Image2Action; rows flagged by
+    # SequencePlan.predict_initial_state). a0 is 1 of T+1 rows in the plain element mean, yet it is
+    # the hardest target (absolute camera-frame pose from pixels); >1 rebalances toward it without
+    # changing the denominator. 1.0 = disabled (default, no effect on runs without a0).
+    action_initial_state_loss_weight: float = 1.0
 
     # Independent noise schedule for action. When False (default), action shares the sigma
     # sampled from the vision RF on every step — legacy behavior. When True, action samples
