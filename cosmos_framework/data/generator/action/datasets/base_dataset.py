@@ -295,6 +295,13 @@ class ActionBaseDataset(ABC, Dataset):
             raise IndexError(f"Window at index {idx} crosses an episode boundary.")
         return rows
 
+    def raw_action_window(self, idx: int, *, include_initial_state: bool = False) -> np.ndarray:
+        """RAW (un-normalized) action rows of window ``idx``: ``[T, D]``, or ``[T+1, D]`` with the frame-0
+        initial-state row a0 first when ``include_initial_state`` (the Image2Action anchors of that window, built
+        from the dataset's own frame-0 poses -- available for every reader, a0 model or not)."""
+        action = self._build_raw_action(self._window_rows(idx), include_initial_state=include_initial_state)  # type: ignore[attr-defined]
+        return action.numpy() if isinstance(action, torch.Tensor) else np.asarray(action)
+
     def get_shuffle_blocks(self) -> list[tuple[int, int]]:
         """Per-episode ``(first_window, count)`` blocks for ``ActionIterableShuffleDataset``."""
         blocks: list[tuple[int, int]] = []
