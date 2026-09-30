@@ -121,3 +121,6 @@ Export with `cosmos_framework.scripts.export_model` / `convert_model_to_diffuser
 - **Mecka windows.** `snap_to_subtask=True` samples one window per subtask, starting at the subtask boundary, with a
   variable length (up to 73 frames, 1 + 4N). The Action100M arms use dense sliding windows.
 - **Mixing.** `ratio` per dataset weights the three streams (1 : 1 : 1 in the released run).
+- **Small datasets / smoke runs.** The streaming loader shards whole episodes across `ranks × num_workers`; with
+  fewer episodes than shards it falls back to sharding individual windows, so a one-episode example still feeds
+  every rank. Use `dataloader_train.dataloader.num_workers=4` (or lower) on small hosts.

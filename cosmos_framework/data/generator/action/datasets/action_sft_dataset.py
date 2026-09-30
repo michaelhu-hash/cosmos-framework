@@ -89,6 +89,11 @@ class ActionIterableShuffleDataset(IterableDataset):
         nw = wi.num_workers if wi is not None else 1
         global_shard = int(self.shard_rank) * nw + wid
         total_shards = max(1, int(self.shard_world_size) * nw)
+        # Fewer episode blocks than (rank, worker) shards -- small datasets, smoke runs -- would leave most
+        # shards empty forever and hang the pre-warm barrier. Fall back to sharding individual windows
+        # (still sequential within each shard's slice, still disjoint across shards).
+        if len(blocks) < total_shards:
+            blocks = [(idx, 1) for start, length in blocks for idx in range(start, start + length)]
         epoch = 0
         while True:
             g = torch.Generator()
