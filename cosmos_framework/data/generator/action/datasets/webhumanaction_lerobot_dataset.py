@@ -228,6 +228,7 @@ class _WebHumanActionLeRobotDataset(ActionBaseDataset):
     """Window sampling, video decoding and captions shared by the hand and body arms."""
 
     _DOMAIN_NAME: str
+    _ACTION_CAPTION_DATASET_NAME: str  # ACTION_CAPTION_ATTRIBUTE_ADAPTER protocol (released-recipe prompt)
     _ACTION_DIM: int
     _NORMALIZER_PATH: Path
     _INITIAL_STATE_NORMALIZER_PATH: Path
@@ -252,6 +253,7 @@ class _WebHumanActionLeRobotDataset(ActionBaseDataset):
         val_ratio: float = 0.0,
         split_seed: int = 42,
         snap_to_subtask: bool = False,
+        caption_semantics: bool = True,
     ) -> None:
         if viewpoint != "ego_view":
             raise NotImplementedError("WebHumanAction data only supports ego_view.")
@@ -275,6 +277,7 @@ class _WebHumanActionLeRobotDataset(ActionBaseDataset):
             val_ratio=val_ratio,
             split_seed=split_seed,
             snap_to_subtask=snap_to_subtask,
+            action_caption_dataset_name=self._ACTION_CAPTION_DATASET_NAME if caption_semantics else None,
         )
         self._rotation_format: RotationConvention = rotation_format
         source_fps = float(self._info["fps"])
@@ -358,6 +361,7 @@ class WebHumanActionHandLeRobotDataset(_WebHumanActionLeRobotDataset):
     """Action100M hands: domain ``webhumanaction_hand`` (31), 48D camera-free action."""
 
     _DOMAIN_NAME = "webhumanaction_hand"
+    _ACTION_CAPTION_DATASET_NAME = "web_human_action_hand"
     _ACTION_DIM = HAND_ACTION_DIM
     _NORMALIZER_PATH = HAND_NORMALIZER_PATH
     _INITIAL_STATE_NORMALIZER_PATH = HAND_INITIAL_STATE_NORMALIZER_PATH
@@ -394,6 +398,7 @@ class WebHumanActionBodyLeRobotDataset(_WebHumanActionLeRobotDataset):
     """Action100M body: domain ``webhumanaction_body`` (24), 57D head + hands action."""
 
     _DOMAIN_NAME = "webhumanaction_body"
+    _ACTION_CAPTION_DATASET_NAME = "web_human_action_body"
     _ACTION_DIM = BODY_ACTION_DIM
     _NORMALIZER_PATH = BODY_NORMALIZER_PATH
     _INITIAL_STATE_NORMALIZER_PATH = BODY_INITIAL_STATE_NORMALIZER_PATH

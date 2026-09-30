@@ -84,6 +84,10 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
     camera-frame aligned wrist poses at frame 0 and frame-0 fingertips in the wrist-0 frame
     (see ``human_pose_layout``). Needs an asinh-family normalizer plus the a0 stats
     (``HUMANACTION_INITIAL_STATE_NORMALIZER_PATH`` by default).
+
+    ``action_caption_dataset_name`` names the ``ACTION_CAPTION_ATTRIBUTE_ADAPTER`` protocol whose sentences the
+    training prompt appends (``"embodiment_a"`` for the HumanAction recipe: real-world, human actor, head-mounted
+    egocentric view, head + wrists + fingertips); ``None`` (base-Nano recipe) emits no caption attributes.
     """
 
     def __init__(
@@ -105,6 +109,7 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
         val_ratio: float = 0.0,
         split_seed: int = 42,
         snap_to_subtask: bool = False,
+        action_caption_dataset_name: str | None = None,
     ) -> None:
         if viewpoint != "ego_view":
             raise NotImplementedError("Human hand-pose data only supports ego_view.")
@@ -130,6 +135,7 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
             val_ratio=val_ratio,
             split_seed=split_seed,
             snap_to_subtask=snap_to_subtask,
+            action_caption_dataset_name=action_caption_dataset_name,
         )
         source_fps = float(self._info["fps"])
         source_stride = source_fps / self._fps

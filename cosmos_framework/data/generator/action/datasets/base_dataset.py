@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 import torch
 from torch.utils.data import Dataset
 
+from cosmos_framework.data.generator.action.action_caption_attribute_adapter import ACTION_CAPTION_ATTRIBUTE_ADAPTER
 from cosmos_framework.data.generator.action.action_normalization import (
     denormalize_action,
     load_action_stats,
@@ -154,12 +155,24 @@ class ActionBaseDataset(ABC, Dataset):
         val_ratio: float = 0.0,
         split_seed: int = 42,
         snap_to_subtask: bool = False,
+        action_caption_dataset_name: str | None = None,
     ) -> None:
         super().__init__()
         if pose_convention not in SUPPORTED_POSE_CONVENTIONS:
             raise NotImplementedError(
                 f"{type(self).__name__} supports pose conventions {SUPPORTED_POSE_CONVENTIONS}, got {pose_convention!r}."
             )
+        if action_caption_dataset_name is not None and not ACTION_CAPTION_ATTRIBUTE_ADAPTER.supports(
+            action_caption_dataset_name
+        ):
+            raise ValueError(
+                f"No action-caption attribute protocol registered for {action_caption_dataset_name!r}; see "
+                "ACTION_CAPTION_ATTRIBUTE_ADAPTER (action_caption_attribute_adapter.py)."
+            )
+        # Protocol name of ``ACTION_CAPTION_ATTRIBUTE_ADAPTER``; when set every item carries
+        # ``action_caption_attributes`` so ``ActionTransformPipeline(append_action_caption_semantics=True)`` appends the
+        # domain / embodiment / view / caption-subject sentences the released recipes were trained with.
+        self._action_caption_dataset_name = action_caption_dataset_name
 
         self._fps = float(fps)
         self._dt = 1.0 / self._fps
@@ -254,6 +267,11 @@ class ActionBaseDataset(ABC, Dataset):
     @property
     def split(self) -> str:
         return self._split
+
+    @property
+    def action_caption_dataset_name(self) -> str | None:
+        """Caption-semantics protocol name (``None``: items carry no ``action_caption_attributes``)."""
+        return self._action_caption_dataset_name
 
     @property
     def snap_to_subtask(self) -> bool:
@@ -488,6 +506,19 @@ class ActionBaseDataset(ABC, Dataset):
             "idle_frames": torch.tensor(idle_frames, dtype=torch.long),
             # Only a0-enabled datasets carry the flag (absent == False for every consumer); see INITIAL_STATE_MODES.
             **({"has_initial_state": has_initial_state} if self._initial_state is not None else {}),
+            **(
+                {
+                    "action_caption_attributes": ACTION_CAPTION_ATTRIBUTE_ADAPTER.resolve(
+                        self._action_caption_dataset_name,
+                        fps=self._fps,
+                        # observations = action transitions + 1 (the a0 row is a pose, not a transition)
+                        observation_count=int(action.shape[0]) + 1 - int(has_initial_state),
+                        view_count=1,
+                    )
+                }
+                if self._action_caption_dataset_name is not None
+                else {}
+            ),
             **extras,
         }
 

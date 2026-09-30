@@ -62,7 +62,13 @@ def _humanaction_datasets(*, initial_state: str | None) -> dict[str, Any]:
         max_action_dim="${model.config.max_action_dim}",
         tokenizer_config="${model.config.vlm_config.tokenizer}",
         cfg_dropout_rate=0.1,
-        format_prompt_as_json=True,
+        # Released-recipe prompt: plain caption + caption-semantics sentences + resolution (no JSON wrapping,
+        # duration / fps or idle-frame text). The a0 acceptance run showed inference is robust to the JSON
+        # wrapping, but post-training should see the prompt distribution the checkpoint was trained with.
+        format_prompt_as_json=False,
+        append_action_caption_semantics=True,
+        append_duration_fps_timestamps=False,
+        append_idle_frames=False,
         iterable_shuffle=True,
         episode_shuffle_seed=42,
     )

@@ -191,6 +191,7 @@ def test_hand_dataset_end_to_end() -> None:
     assert item["action"].shape == (72, 48)
     assert item["video"].shape[1] == 73 and item["video"].dtype == torch.uint8
     assert int(item["domain_id"]) == 31
+    assert item["action_caption_attributes"]["dataset_name"] == "web_human_action_hand"
     assert torch.isfinite(item["action"]).all()
     raw = dataset.denormalize(item["action"])
     assert torch.isfinite(raw).all()
@@ -210,6 +211,7 @@ def test_body_dataset_end_to_end() -> None:
     item = dataset[0]
     assert item["action"].shape == (72, 57)
     assert int(item["domain_id"]) == 24
+    assert item["action_caption_attributes"]["dataset_name"] == "web_human_action_body"
     assert torch.isfinite(item["action"]).all()
     _check_initial_state_end_to_end(
         m.WebHumanActionBodyLeRobotDataset, os.environ["COSMOS_WEBHUMANACTION_BODY_LEROBOT_ROOT"], 57
@@ -285,3 +287,92 @@ def test_initial_state_stats_match_the_arm_widths() -> None:
     ):
         stats = json.loads(path.read_text())["global"]
         assert all(len(stats[key]) == dim for key in ("mean", "std", "q01", "q99"))
+
+
+# Training prompt of the released Cosmos3-Nano-HumanAction checkpoints (internal recipe: plain caption followed by the
+# dataset's caption-semantics sentences and the resolution; no JSON wrapping, duration / fps or idle-frame text).
+_RELEASED_HAND_PROMPT_TAIL = (
+    "The video is captured from a real-world environment. The video shows a human actor. "
+    "This video is captured from a static perspective looking towards the actor. "
+    "The action performed by the human actor is defined as the wrist and fingertip motion of the actor's hands, "
+    "mapped to the right and left wrist-pose and fingertip components. This video is of 480x832 resolution."
+)
+
+
+@pytest.mark.L0
+def test_readers_register_the_released_caption_semantics() -> None:
+    from cosmos_framework.data.generator.action.action_caption_attribute_adapter import ACTION_CAPTION_ATTRIBUTE_ADAPTER
+
+    assert m.WebHumanActionHandLeRobotDataset._ACTION_CAPTION_DATASET_NAME == "web_human_action_hand"
+    assert m.WebHumanActionBodyLeRobotDataset._ACTION_CAPTION_DATASET_NAME == "web_human_action_body"
+    for name in ("web_human_action_hand", "web_human_action_body", "embodiment_a"):
+        assert ACTION_CAPTION_ATTRIBUTE_ADAPTER.supports(name)
+    attrs = ACTION_CAPTION_ATTRIBUTE_ADAPTER.resolve("web_human_action_hand", fps=15.0, observation_count=73, view_count=1)
+    assert attrs["view_postfix"] == "This video is captured from a static perspective looking towards the actor."
+    assert attrs["action_transition_count"] == 72
+
+
+@pytest.mark.L0
+def test_humanaction_factories_default_to_the_released_prompt() -> None:
+    import inspect
+
+    from cosmos_framework.data.generator.action.datasets import action_sft_dataset as sft_module
+
+    for fn in (
+        sft_module.get_action_webhumanaction_hand_sft_dataset,
+        sft_module.get_action_webhumanaction_body_sft_dataset,
+        sft_module.get_action_human_hand_pose_sft_dataset,
+    ):
+        defaults = {k: v.default for k, v in inspect.signature(fn).parameters.items()}
+        assert defaults["append_action_caption_semantics"] is True, fn.__name__
+        assert defaults["format_prompt_as_json"] is False, fn.__name__
+        assert defaults["append_duration_fps_timestamps"] is False and defaults["append_idle_frames"] is False, fn.__name__
+        assert defaults["append_resolution_info"] is True, fn.__name__
+    mecka = inspect.signature(sft_module.get_action_human_hand_pose_sft_dataset).parameters
+    assert mecka["action_caption_dataset_name"].default == "embodiment_a"
+
+
+@pytest.mark.L0
+def test_humanaction_sft_prompt_matches_the_released_recipe() -> None:
+    """The factory transform turns a reader item into the exact training prompt of the released checkpoints."""
+    from cosmos_framework.data.generator.action.action_caption_attribute_adapter import ACTION_CAPTION_ATTRIBUTE_ADAPTER
+    from cosmos_framework.data.generator.action.datasets.action_sft_dataset import _humanaction_sft
+
+    class _OneItem(torch.utils.data.Dataset):
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, idx: int) -> dict:
+            return {
+                "ai_caption": "The person places a ruler on the fabric.",
+                "video": torch.zeros(3, 73, 480, 832, dtype=torch.uint8),  # [C,T,H,W], reader layout
+                "action": torch.zeros(72, 48),
+                "conditioning_fps": torch.tensor(15),
+                "mode": "forward_dynamics",
+                "domain_id": torch.tensor(31),
+                "viewpoint": "ego_view",
+                "idle_frames": torch.tensor(0),
+                "action_caption_attributes": ACTION_CAPTION_ATTRIBUTE_ADAPTER.resolve(
+                    "web_human_action_hand", fps=15.0, observation_count=73, view_count=1
+                ),
+            }
+
+    sft = _humanaction_sft(
+        _OneItem(),
+        resolution="480",
+        max_action_dim=64,
+        tokenizer_config=None,
+        cfg_dropout_rate=0.0,
+        append_viewpoint_info=True,
+        append_action_caption_semantics=True,
+        append_duration_fps_timestamps=False,
+        append_resolution_info=True,
+        append_idle_frames=False,
+        format_prompt_as_json=False,
+        iterable_shuffle=False,
+        episode_shuffle_seed=0,
+    )
+    item = sft[0]
+    assert item["ai_caption"] == "The person places a ruler on the fabric. " + _RELEASED_HAND_PROMPT_TAIL
+    assert item["action"].shape == (72, 64)
+    assert "action_caption_attributes" not in item

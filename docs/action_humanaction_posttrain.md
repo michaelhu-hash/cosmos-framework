@@ -121,6 +121,15 @@ Export with `cosmos_framework.scripts.export_model` / `convert_model_to_diffuser
 - **Mecka windows.** `snap_to_subtask=True` samples one window per subtask, starting at the subtask boundary, with a
   variable length (up to 73 frames, 1 + 4N). The Action100M arms use dense sliding windows.
 - **Mixing.** `ratio` per dataset weights the three streams (1 : 1 : 1 in the released run).
+- **Prompt.** The released checkpoints were trained on the plain caption followed by the dataset's
+  caption-semantics sentences and the resolution, e.g. `<caption> The video is captured from a real-world
+  environment. The video shows a human actor. This video is captured from a static perspective looking towards
+  the actor. The action performed by the human actor is defined as the wrist and fingertip motion of the actor's
+  hands, mapped to the right and left wrist-pose and fingertip components. This video is of 480x832 resolution.`
+  The readers emit the sentences as `action_caption_attributes` (`web_human_action_hand` / `web_human_action_body`
+  / `embodiment_a` protocols of `action_caption_attribute_adapter.py`) and the factories default to
+  `append_action_caption_semantics=True`, `format_prompt_as_json=False`, no duration / idle-frame text. The
+  inference CLIs JSON-wrap prompts; the checkpoints are robust to that (verified on the internal eval clips).
 - **Small datasets / smoke runs.** The streaming loader shards whole episodes across `ranks × num_workers`; with
   fewer episodes than shards it falls back to sharding individual windows, so a one-episode example still feeds
   every rank. Use `dataloader_train.dataloader.num_workers=4` (or lower) on small hosts.

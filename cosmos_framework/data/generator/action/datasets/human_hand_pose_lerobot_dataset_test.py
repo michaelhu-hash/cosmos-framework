@@ -30,6 +30,12 @@ def test_initial_state_requires_an_asinh_family_normalizer(tmp_path) -> None:
         m.HumanHandPoseLeRobotDataset(str(tmp_path), action_normalization="quantile", initial_state="predict")
 
 
+@pytest.mark.L0
+def test_caption_semantics_protocol_is_validated_before_any_io(tmp_path) -> None:
+    with pytest.raises(ValueError, match="protocol"):
+        m.HumanHandPoseLeRobotDataset(str(tmp_path), action_caption_dataset_name="not_a_protocol")
+
+
 @pytest.mark.L1
 @pytest.mark.skipif(
     "COSMOS_HUMAN_HAND_POSE_LEROBOT_ROOT" not in os.environ,
@@ -46,6 +52,12 @@ def test_initial_state_end_to_end() -> None:
     dataset = m.HumanHandPoseLeRobotDataset(root, mode="inverse_dynamics", initial_state="predict", **kwargs)
     item = dataset[0]
     assert item["action"].shape == (73, 57) and item["has_initial_state"] is True
+    assert "action_caption_attributes" not in item  # base-Nano reader default: no caption semantics
+    semantic = m.HumanHandPoseLeRobotDataset(
+        root, mode="inverse_dynamics", initial_state="predict", action_caption_dataset_name="embodiment_a", **kwargs
+    )[0]
+    attrs = semantic["action_caption_attributes"]
+    assert attrs["dataset_name"] == "embodiment_a" and attrs["observation_count"] == 73
     raw = dataset.denormalize(item["action"])
     torch.testing.assert_close(dataset.normalize(raw), item["action"], atol=1e-4, rtol=1e-4)
     a0, rows = split_initial_state(raw.numpy())

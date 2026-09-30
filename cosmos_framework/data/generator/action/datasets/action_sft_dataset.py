@@ -398,6 +398,7 @@ def _humanaction_sft(
     tokenizer_config: dict | None,
     cfg_dropout_rate: float,
     append_viewpoint_info: bool,
+    append_action_caption_semantics: bool,
     append_duration_fps_timestamps: bool,
     append_resolution_info: bool,
     append_idle_frames: bool,
@@ -405,11 +406,15 @@ def _humanaction_sft(
     iterable_shuffle: bool,
     episode_shuffle_seed: int,
 ) -> Dataset:
+    # Prompt = plain caption + the dataset's caption-semantics sentences (domain / embodiment / view / subject,
+    # from the reader's ``action_caption_attributes``) + resolution -- exactly what the released HumanAction
+    # checkpoints were trained with (no JSON wrapping, duration / fps or idle-frame text).
     transform = ActionTransformPipeline(
         tokenizer_config=tokenizer_config,
         cfg_dropout_rate=cfg_dropout_rate,
         max_action_dim=max_action_dim,
         append_viewpoint_info=append_viewpoint_info,
+        append_action_caption_semantics=append_action_caption_semantics,
         append_duration_fps_timestamps=append_duration_fps_timestamps,
         append_resolution_info=append_resolution_info,
         append_idle_frames=append_idle_frames,
@@ -442,15 +447,16 @@ def get_action_webhumanaction_hand_sft_dataset(
     tokenizer_config: dict | None = None,
     cfg_dropout_rate: float = 0.1,
     append_viewpoint_info: bool = True,
-    append_duration_fps_timestamps: bool = True,
+    append_action_caption_semantics: bool = True,
+    append_duration_fps_timestamps: bool = False,
     append_resolution_info: bool = True,
-    append_idle_frames: bool = True,
-    format_prompt_as_json: bool = True,
+    append_idle_frames: bool = False,
+    format_prompt_as_json: bool = False,
     iterable_shuffle: bool = True,
     episode_shuffle_seed: int = 42,
 ) -> Dataset:
     """Action100M hands (``webhumanaction_hand``, 48D) SFT dataset with the HumanAction recipe defaults
-    (15 fps, 72-step chunks, chunk-anchored rot6d deltas, piecewise-asinh normalization, JSON prompts).
+    (15 fps, 72-step chunks, chunk-anchored rot6d deltas, piecewise-asinh normalization, plain-text prompts = caption + caption-semantics sentences + resolution, as trained).
     ``mode="joint"`` draws forward_dynamics / inverse_dynamics / wam per sample like the released joint recipe;
     ``initial_state="predict"`` trains the Image2Action a0 row."""
     dataset = WebHumanActionHandLeRobotDataset(
@@ -476,6 +482,7 @@ def get_action_webhumanaction_hand_sft_dataset(
         tokenizer_config=tokenizer_config,
         cfg_dropout_rate=cfg_dropout_rate,
         append_viewpoint_info=append_viewpoint_info,
+        append_action_caption_semantics=append_action_caption_semantics,
         append_duration_fps_timestamps=append_duration_fps_timestamps,
         append_resolution_info=append_resolution_info,
         append_idle_frames=append_idle_frames,
@@ -506,10 +513,11 @@ def get_action_webhumanaction_body_sft_dataset(
     tokenizer_config: dict | None = None,
     cfg_dropout_rate: float = 0.1,
     append_viewpoint_info: bool = True,
-    append_duration_fps_timestamps: bool = True,
+    append_action_caption_semantics: bool = True,
+    append_duration_fps_timestamps: bool = False,
     append_resolution_info: bool = True,
-    append_idle_frames: bool = True,
-    format_prompt_as_json: bool = True,
+    append_idle_frames: bool = False,
+    format_prompt_as_json: bool = False,
     iterable_shuffle: bool = True,
     episode_shuffle_seed: int = 42,
 ) -> Dataset:
@@ -537,6 +545,7 @@ def get_action_webhumanaction_body_sft_dataset(
         tokenizer_config=tokenizer_config,
         cfg_dropout_rate=cfg_dropout_rate,
         append_viewpoint_info=append_viewpoint_info,
+        append_action_caption_semantics=append_action_caption_semantics,
         append_duration_fps_timestamps=append_duration_fps_timestamps,
         append_resolution_info=append_resolution_info,
         append_idle_frames=append_idle_frames,
@@ -562,15 +571,17 @@ def get_action_human_hand_pose_sft_dataset(
     split_seed: int = 42,
     snap_to_subtask: bool = True,
     sample_stride: int = 1,
+    action_caption_dataset_name: str | None = "embodiment_a",
     resolution: str | int = "480",
     max_action_dim: int = 64,
     tokenizer_config: dict | None = None,
     cfg_dropout_rate: float = 0.1,
     append_viewpoint_info: bool = True,
-    append_duration_fps_timestamps: bool = True,
+    append_action_caption_semantics: bool = True,
+    append_duration_fps_timestamps: bool = False,
     append_resolution_info: bool = True,
-    append_idle_frames: bool = True,
-    format_prompt_as_json: bool = True,
+    append_idle_frames: bool = False,
+    format_prompt_as_json: bool = False,
     iterable_shuffle: bool = True,
     episode_shuffle_seed: int = 42,
 ) -> Dataset:
@@ -592,6 +603,7 @@ def get_action_human_hand_pose_sft_dataset(
         split_seed=split_seed,
         snap_to_subtask=snap_to_subtask,
         sample_stride=sample_stride,
+        action_caption_dataset_name=action_caption_dataset_name,
     )
     return _humanaction_sft(
         dataset,
@@ -600,6 +612,7 @@ def get_action_human_hand_pose_sft_dataset(
         tokenizer_config=tokenizer_config,
         cfg_dropout_rate=cfg_dropout_rate,
         append_viewpoint_info=append_viewpoint_info,
+        append_action_caption_semantics=append_action_caption_semantics,
         append_duration_fps_timestamps=append_duration_fps_timestamps,
         append_resolution_info=append_resolution_info,
         append_idle_frames=append_idle_frames,
