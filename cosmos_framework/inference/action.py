@@ -163,6 +163,37 @@ def build_action_batch(
     }
 
 
+def resolve_raw_action_dim(domain_name: str, model_mode: ModelMode, requested: int | None) -> int | None:
+    """Raw action width for ``domain_name``: the registered canonical width, else the spec's ``raw_action_dim``.
+
+    Domains in ``_PER_DATASET_ACTION_WIDTH`` (``hand_pose`` = Mecka / Cosmos3-Nano-HumanAction 57D, ``libero``,
+    ``robocasa``) have no canonical width: forward dynamics takes it from the action file (``None`` here), inverse
+    dynamics / wam need the spec to say it. A requested width that contradicts a canonical one is an error.
+    """
+    canonical = EMBODIMENT_TO_RAW_ACTION_DIM.get(domain_name)
+    if canonical is not None:
+        if requested is not None and int(requested) != int(canonical):
+            raise ValueError(
+                f"raw_action_dim={requested} contradicts the registered width {canonical} of domain_name {domain_name!r}"
+            )
+        return int(canonical)
+    if domain_name not in _PER_DATASET_ACTION_WIDTH:
+        raise ValueError(
+            f"no raw action width registered for domain_name {domain_name!r}; domains with a "
+            f"canonical width are {sorted(EMBODIMENT_TO_RAW_ACTION_DIM.keys())}"
+        )
+    if requested is not None:
+        if int(requested) <= 0:
+            raise ValueError(f"raw_action_dim must be positive, got {requested}")
+        return int(requested)
+    if model_mode is not ModelMode.FORWARD_DYNAMICS:
+        raise ValueError(
+            f"domain_name {domain_name!r} sizes its raw action per dataset; pass raw_action_dim in the spec for "
+            f"{model_mode.value} (forward_dynamics reads the width from the action file)"
+        )
+    return None
+
+
 def get_action_sample_data(
     model_config: Any,
     *,
@@ -178,6 +209,7 @@ def get_action_sample_data(
     max_action_dim: int,
     fps: int,
     device: Any,
+    raw_action_dim: int | None = None,
 ) -> dict:
     """Load observation image/video + optional actions and build an Action inference batch."""
     domain_name = domain_name.lower().strip()
@@ -186,20 +218,7 @@ def get_action_sample_data(
             f"invalid domain_name {domain_name!r}; expected one of {sorted(EMBODIMENT_TO_DOMAIN_ID.keys())}"
         )
 
-    raw_action_dim = EMBODIMENT_TO_RAW_ACTION_DIM.get(domain_name)
-    if raw_action_dim is None:
-        if domain_name not in _PER_DATASET_ACTION_WIDTH:
-            raise ValueError(
-                f"no raw action width registered for domain_name {domain_name!r}; domains with a "
-                f"canonical width are {sorted(EMBODIMENT_TO_RAW_ACTION_DIM.keys())}"
-            )
-        if model_mode is not ModelMode.FORWARD_DYNAMICS:
-            raise ValueError(
-                f"domain_name {domain_name!r} sizes its raw action per dataset, so {model_mode.value} "
-                f"inference is unsupported for it; only forward_dynamics can resolve the width, from "
-                f"the action file it is given"
-            )
-
+    raw_action_dim = resolve_raw_action_dim(domain_name, model_mode, raw_action_dim)
     frames, _ = read_media_frames(Path(vision_path), max_frames=action_chunk_size + 1)
     action, raw_action_dim = _load_actions(action_path, model_mode, action_chunk_size, max_action_dim, raw_action_dim)
 

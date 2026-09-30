@@ -671,6 +671,7 @@ def get_sample_data(
             max_action_dim=model.config.max_action_dim,
             fps=sample_args.fps,
             device=device,
+            raw_action_dim=sample_args.raw_action_dim,
         )
 
     if sample_args.model_mode == ModelMode.IMAGE2IMAGE:
