@@ -335,6 +335,24 @@ def _delta_transform_to_pose_vector(
     return np.concatenate([translation, rotation]).astype(np.float32)
 
 
+def absolute_pose_to_vector(pose: np.ndarray, rotation_format: RotationConvention) -> np.ndarray:
+    """Encode an ABSOLUTE SE(3) pose as an action-row block ``[translation(3), rotation(...)]``.
+
+    Same layout as the relative-delta blocks produced by :func:`pose_abs_to_rel`, so an
+    absolute pose can sit in the action stream next to deltas (e.g. the predicted
+    frame-0 "initial state" row). Inverse: :func:`build_abs_pose_from_components` /
+    :func:`_pose_vector_to_delta_transform`.
+
+    Args:
+        pose: ``(4, 4)`` homogeneous transform.
+        rotation_format: Output rotation convention (``rot6d`` / ``rot9d`` / ...).
+
+    Returns:
+        ``float32`` vector of length ``3 + rotation_dim``.
+    """
+    return _delta_transform_to_pose_vector(pose, rotation_output_format=rotation_format)
+
+
 def _pose_vector_to_delta_transform(
     pose_vector: np.ndarray,
     rotation_input_format: RotationConvention,

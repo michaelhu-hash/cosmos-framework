@@ -198,6 +198,60 @@ class ActionPiecewiseAsinhNormalization:
         return z * scale + offset  # [...,D]
 
 
+def sample_has_initial_state(sample: dict[str, Any] | None) -> bool:
+    """Read the ``has_initial_state`` item flag robustly (bool, 0-d tensor, or 1-element list)."""
+    if sample is None:
+        return False
+    value = sample.get("has_initial_state", False)
+    if isinstance(value, torch.Tensor):
+        return bool(value.reshape(-1)[0].item()) if value.numel() else False
+    if isinstance(value, (list, tuple)):
+        return sample_has_initial_state({"has_initial_state": value[0]}) if len(value) else False
+    return bool(value)
+
+
+@dataclass(frozen=True)
+class ActionInitialStateNormalization:
+    """Row-aware normalizer for actions that carry a frame-0 initial-state row ``a0``.
+
+    Row 0 (``a0``: the absolute camera-frame pose at frame 0, emitted by datasets that set
+    the ``has_initial_state`` item flag) lives on a different scale
+    than the relative-delta rows ``1..T`` (~0.4 m absolute wrist translation vs cm-scale
+    deltas), so it gets its own per-dim statistics. Only row 0 is routed to
+    ``initial_state``; every other row goes through ``base``. Both members share the
+    action width ``D`` and the same ``[...,T,D]`` layout, so this wrapper is a drop-in
+    ``ActionNormalizer`` for ``ActionProcessor``.
+
+    The wrapper is selected per sample by ``Dataset.get_action_normalizer(sample)`` when
+    the item is flagged ``has_initial_state``; plain (T, D) samples never see it.
+    """
+
+    base: ActionNormalizer
+    initial_state: ActionNormalizer
+
+    @staticmethod
+    def _check(action: torch.Tensor) -> None:
+        if action.ndim < 2 or action.shape[-2] < 1:
+            raise ValueError(
+                "ActionInitialStateNormalization expects [..., T+1, D] with the initial-state row at index 0, "
+                f"got shape {tuple(action.shape)}"
+            )
+
+    def normalize_action(self, action: torch.Tensor) -> torch.Tensor:  # action: [...,T+1,D], returns [...,T+1,D]
+        """Normalize row 0 with the initial-state stats and rows 1.. with the base stats."""
+        self._check(action)
+        rest = self.base.normalize_action(action[..., 1:, :])  # [...,T,D]
+        row0 = self.initial_state.normalize_action(action[..., :1, :])  # [...,1,D]
+        return torch.cat([row0, rest], dim=-2)  # [...,T+1,D]
+
+    def denormalize_action(self, action: torch.Tensor) -> torch.Tensor:  # action: [...,T+1,D], returns [...,T+1,D]
+        """Invert :meth:`normalize_action` row-wise."""
+        self._check(action)
+        rest = self.base.denormalize_action(action[..., 1:, :])  # [...,T,D]
+        row0 = self.initial_state.denormalize_action(action[..., :1, :])  # [...,1,D]
+        return torch.cat([row0, rest], dim=-2)  # [...,T+1,D]
+
+
 def load_action_stats(stats_path: str, stats_key: str = "global") -> dict[str, np.ndarray]:
     """Load pre-computed action normalization stats from a JSON file."""
     path = Path(stats_path)

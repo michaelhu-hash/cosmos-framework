@@ -1395,6 +1395,11 @@ class SequencePlan:
     has_action: bool = False
     condition_frame_indexes_action: list[int] = field(default_factory=list)
     action_start_frame_offset: int = 1
+    # True when action row ``len(condition_frame_indexes_action)`` is the frame-0 initial-state row a0
+    # (predicted, placed on vision frame 0). Set by ``build_sequence_plan_from_mode(predict_initial_state=True)``;
+    # the training loss reads it to upweight a0 (``action_initial_state_loss_weight``). Packing itself
+    # only needs the offset/condition fields above.
+    predict_initial_state: bool = False
 
     # -- sound modality --
     has_sound: bool = False

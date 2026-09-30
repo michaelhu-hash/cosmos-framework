@@ -12,6 +12,7 @@ from cosmos_framework.data.generator.action.utils.json_formatter import ActionPr
 from cosmos_framework.data.generator.action.utils.transforms import (
     ActionTransformPipeline,
     add_action_mode_metadata,
+    build_sequence_plan_from_mode,
     reflection_pad_to_target,
     remove_reflection_padding,
 )
@@ -631,3 +632,67 @@ def test_action_prompt_json_formatter_matches_video_json_common_metadata() -> No
     assert action_prompt["actions"][0]["time"] == video_prompt["actions"][0]["time"]
     assert action_prompt["actions"][0]["description"] == video_prompt["actions"][0]["description"]
     assert action_prompt["actions"][0]["idle_frame"] == "3 out of 22."
+
+
+@pytest.mark.L0
+def test_build_sequence_plan_predict_initial_state_noises_row0() -> None:
+    """With the flag, the T+1 layout is a0 + deltas: nothing conditioning, a0 on frame 0."""
+    for mode in ("inverse_dynamics", "wam"):
+        plan = build_sequence_plan_from_mode(mode, video_length=73, action_length=73, predict_initial_state=True)
+        assert plan.condition_frame_indexes_action == []
+        assert plan.action_start_frame_offset == 0
+        assert plan.predict_initial_state is True
+    # Legacy Case B (use_state): same shape, row 0 is a CLEAN measured state.
+    legacy = build_sequence_plan_from_mode("inverse_dynamics", video_length=73, action_length=73)
+    assert legacy.condition_frame_indexes_action == [0]
+    assert legacy.action_start_frame_offset == 0
+    assert legacy.predict_initial_state is False
+    # Plain T-row layout is untouched.
+    plain = build_sequence_plan_from_mode("inverse_dynamics", video_length=73, action_length=72)
+    assert plain.condition_frame_indexes_action == []
+    assert plain.action_start_frame_offset == 1
+    assert plain.predict_initial_state is False
+    # History rows stay conditioning; a0 follows them on frame 0.
+    hist = build_sequence_plan_from_mode(
+        "inverse_dynamics", video_length=73, action_length=75, num_history_actions=2, predict_initial_state=True
+    )
+    assert hist.condition_frame_indexes_action == [0, 1]
+    assert hist.action_start_frame_offset == -2
+    with pytest.raises(ValueError):
+        build_sequence_plan_from_mode("forward_dynamics", video_length=73, action_length=73, predict_initial_state=True)
+    with pytest.raises(ValueError):
+        build_sequence_plan_from_mode("inverse_dynamics", video_length=73, action_length=72, predict_initial_state=True)
+
+
+@pytest.mark.L0
+@pytest.mark.parametrize("flag", [True, torch.tensor(True), [True]])
+def test_action_transform_pipeline_reads_has_initial_state_flag(flag) -> None:
+    """Datasets that prepend a0 set ``has_initial_state``; the pipeline turns it into the a0 plan."""
+    pipeline = ActionTransformPipeline(
+        tokenizer_config=None,
+        max_action_dim=4,
+        append_viewpoint_info=False,
+        append_duration_fps_timestamps=False,
+        append_resolution_info=False,
+    )
+
+    def make(with_flag: bool) -> dict:
+        data_dict = {
+            "ai_caption": "Open the drawer.",
+            "video": torch.zeros(3, 17, 256, 256),  # [C,T,H,W]
+            "action": torch.zeros(17, 2),  # [T+1,D]: a0 + 16 deltas
+            "mode": "inverse_dynamics",
+            "domain_id": torch.tensor(0),  # []
+        }
+        if with_flag:
+            data_dict["has_initial_state"] = flag
+        return data_dict
+
+    plan = pipeline(make(True), resolution="256")["sequence_plan"]
+    assert plan.predict_initial_state is True
+    assert plan.condition_frame_indexes_action == []
+    assert plan.action_start_frame_offset == 0
+    # Same shape without the flag keeps the legacy use_state meaning (row 0 clean).
+    legacy = pipeline(make(False), resolution="256")["sequence_plan"]
+    assert legacy.predict_initial_state is False
+    assert legacy.condition_frame_indexes_action == [0]

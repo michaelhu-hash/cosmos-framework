@@ -30,6 +30,7 @@ from cosmos_framework.data.generator.action.utils.action_processing import (
     ActionCodec,
     ActionNormalizer,
     ActionProcessor,
+    sample_has_initial_state,
 )
 from cosmos_framework.data.generator.action.utils.json_formatter import ActionPromptJsonFormatter
 from cosmos_framework.data.generator.action.utils.viewpoint_utils import ViewpointTextInfo
@@ -284,8 +285,18 @@ def build_sequence_plan_from_mode(
     has_text: bool = True,
     video_temporal_downsample: int = 4,
     num_history_actions: int = 0,
+    predict_initial_state: bool = False,
 ) -> SequencePlan:
     """Build a SequencePlan based on the training mode.
+
+    ``predict_initial_state=True`` declares that the action stream carries the frame-0
+    initial-state row a0 right after the history block (``action_length == video_length``
+    with dense video, i.e. the Case B shape below) and that a0 must be GENERATED, not
+    given: it is left out of ``condition_frame_indexes_action`` (noised + supervised like
+    every delta row) and ``action_start_frame_offset`` puts it on vision frame 0. Only
+    inverse_dynamics / wam accept it -- forward-dynamics samples never carry a0.
+    Without the flag, the Case B shape keeps its legacy ``use_state`` meaning (row 0 is a
+    CLEAN measured robot state).
 
     This function determines whether action should be included and computes the
     appropriate condition frame indexes for vision and action based on the mode.
@@ -365,6 +376,27 @@ def build_sequence_plan_from_mode(
     #       present.
     base_action_length = action_length - num_history_actions
     has_initial_state = video_length > 1 and (base_action_length - 1) % (video_length - 1) == 0
+    if predict_initial_state:
+        if mode not in ("inverse_dynamics", "wam"):
+            raise ValueError(
+                f"predict_initial_state is only defined for inverse_dynamics / wam, got mode={mode!r} "
+                "(forward-dynamics samples must not carry an initial-state row)."
+            )
+        if base_action_length != video_length:
+            raise ValueError(
+                "predict_initial_state requires one action row per video frame (a0 + one delta per frame), "
+                f"got action_length={action_length}, num_history_actions={num_history_actions}, "
+                f"video_length={video_length}."
+            )
+        return SequencePlan(
+            has_text=has_text,
+            has_vision=True,
+            has_action=True,
+            condition_frame_indexes_vision=condition_frame_indexes_vision,
+            condition_frame_indexes_action=list(range(num_history_actions)),  # a0 is predicted, not conditioning
+            action_start_frame_offset=-num_history_actions,  # a0 <-> vision frame 0, row k <-> frame k
+            predict_initial_state=True,
+        )
     if mode == "forward_dynamics":
         condition_frame_indexes_action = list(range(action_length))
     elif mode == "policy":
@@ -812,12 +844,17 @@ class ActionTransformPipeline:
         elif history_normalized_action is not None:
             raise ValueError("history_normalized_action requires history_action")
 
+        # ``has_initial_state`` is set by datasets that prepend the frame-0 initial-state row
+        # a0 (Image2Action); the plan then noises+supervises row 0 instead of treating the
+        # Case B shape as a clean measured state.
+        predict_initial_state = sample_has_initial_state(data_dict)
         sequence_plan = build_sequence_plan_from_mode(
             mode=mode,
             video_length=video_length,
             action_length=action_length,
             video_temporal_downsample=self.video_temporal_downsample,
             num_history_actions=num_history_actions,
+            predict_initial_state=predict_initial_state,
         )
         data_dict["sequence_plan"] = sequence_plan
 

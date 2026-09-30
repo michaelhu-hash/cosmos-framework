@@ -8,8 +8,11 @@ from scipy.spatial.transform import Rotation as R
 
 from cosmos_framework.data.generator.action.utils.action_spec import Gripper, Pos, Rot, build_action_spec
 from cosmos_framework.data.generator.action.utils.pose_utils import (
+    _delta_transform_to_pose_vector,
     _normalize_rotation_matrices,
+    _pose_vector_to_delta_transform,
     _to_numpy_float32,
+    absolute_pose_to_vector,
     build_abs_pose_from_components,
     compute_framewise_idle_frames,
     convert_rotation,
@@ -381,3 +384,18 @@ def test_anchor_index_out_of_range_is_rejected() -> None:
         pose_abs_to_rel(poses_abs, rotation_format="rot6d", pose_convention="backward_anchored", anchor_index=4)
     with pytest.raises(ValueError, match="out of range"):
         pose_abs_to_rel(poses_abs, rotation_format="rot6d", pose_convention="backward_anchored", anchor_index=-1)
+
+
+@pytest.mark.L0
+@pytest.mark.parametrize("rotation_format", ["rot6d", "quat_xyzw", "axisangle"])
+def test_absolute_pose_to_vector_round_trips_through_delta_decoder(rotation_format: str) -> None:
+    """An absolute pose encoded as an action block decodes back with the delta decoder."""
+    pose = np.eye(4)
+    pose[:3, :3] = R.from_rotvec([0.3, -0.5, 0.8]).as_matrix()
+    pose[:3, 3] = [0.42, -0.11, 0.97]
+    vec = absolute_pose_to_vector(pose, rotation_format)
+    assert vec.dtype == np.float32
+    np.testing.assert_allclose(vec[:3], pose[:3, 3], atol=1e-6)
+    np.testing.assert_array_equal(vec, _delta_transform_to_pose_vector(pose, rotation_format))
+    back = _pose_vector_to_delta_transform(vec, rotation_format, translation_scale=1.0, normalize_rotation=False)
+    np.testing.assert_allclose(back, pose, atol=1e-5)
