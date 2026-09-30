@@ -44,6 +44,7 @@ def _load_actions(
     action_chunk_size: int,
     max_action_dim: int,
     raw_action_dim: int | None,
+    predict_initial_state: bool = False,
 ) -> tuple[torch.Tensor, int]:
     """Load actions from JSON (or zeros for policy mode and inverse dynamics mode).
 
@@ -51,7 +52,12 @@ def _load_actions(
     In forward-dynamics mode the width comes from the action file itself, so
     ``raw_action_dim`` is only a cross-check and may be ``None`` for domains that
     have no single canonical width (e.g. ``hand_pose``, ``libero``).
+
+    ``predict_initial_state`` (Image2Action) adds the frame-0 initial-state row a0 to the generated rows of
+    inverse dynamics / wam: ``action_chunk_size + 1`` all-noisy rows, one per video frame.
     """
+    if predict_initial_state and model_mode is ModelMode.FORWARD_DYNAMICS:
+        raise ValueError("predict_initial_state is only defined for inverse_dynamics / wam")
     match model_mode:
         case ModelMode.FORWARD_DYNAMICS:
             assert action_path is not None, "action_path is required for forward_dynamics mode"
@@ -64,7 +70,8 @@ def _load_actions(
             return pad_action_to_max_dim(raw, max_action_dim), raw_dim
         case ModelMode.WAM | ModelMode.INVERSE_DYNAMICS:
             assert raw_action_dim is not None, "raw_action_dim is required for policy and inverse_dynamics modes"
-            return torch.zeros(action_chunk_size, max_action_dim, dtype=torch.float32), raw_action_dim
+            num_rows = action_chunk_size + int(predict_initial_state)
+            return torch.zeros(num_rows, max_action_dim, dtype=torch.float32), raw_action_dim
         case _:
             raise ValueError(f"Unsupported action model_mode: {model_mode}")
 
@@ -108,9 +115,20 @@ def build_action_batch(
     input_video_key: str,
     batch_size: int = 1,
     device: Any = "cuda",
+    predict_initial_state: bool = False,
 ) -> dict:
-    """Build an Action data batch from pre-loaded video and action tensors."""
+    """Build an Action data batch from pre-loaded video and action tensors.
+
+    With ``predict_initial_state`` the action tensor carries ``action_chunk_size + 1`` rows (a0 + deltas) and the
+    sequence plan generates row 0 on vision frame 0 instead of treating it as a clean state.
+    """
     target_frames = action_chunk_size + 1
+    expected_rows = action_chunk_size + int(predict_initial_state)
+    if action.shape[0] != expected_rows:
+        raise ValueError(
+            f"expected {expected_rows} action rows for action_chunk_size={action_chunk_size} "
+            f"(predict_initial_state={predict_initial_state}), got {action.shape[0]}"
+        )
     _, num_frames, h, w = video.shape
 
     if num_frames < target_frames:
@@ -131,8 +149,9 @@ def build_action_batch(
     sequence_plan = build_sequence_plan_from_mode(
         mode=model_mode.value,
         video_length=target_frames,
-        action_length=action_chunk_size,
+        action_length=expected_rows,
         has_text=True,
+        predict_initial_state=predict_initial_state,
     )
 
     ai_caption = _format_prompt(
@@ -178,6 +197,7 @@ def get_action_sample_data(
     max_action_dim: int,
     fps: int,
     device: Any,
+    predict_initial_state: bool = False,
 ) -> dict:
     """Load observation image/video + optional actions and build an Action inference batch."""
     domain_name = domain_name.lower().strip()
@@ -201,7 +221,9 @@ def get_action_sample_data(
             )
 
     frames, _ = read_media_frames(Path(vision_path), max_frames=action_chunk_size + 1)
-    action, raw_action_dim = _load_actions(action_path, model_mode, action_chunk_size, max_action_dim, raw_action_dim)
+    action, raw_action_dim = _load_actions(
+        action_path, model_mode, action_chunk_size, max_action_dim, raw_action_dim, predict_initial_state
+    )
 
     return build_action_batch(
         video=frames,
@@ -217,4 +239,5 @@ def get_action_sample_data(
         input_video_key=model_config.input_video_key,
         batch_size=batch_size,
         device=device,
+        predict_initial_state=predict_initial_state,
     )

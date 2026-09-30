@@ -623,6 +623,7 @@ class ActionDataArgs(ArgsBase):
     action_chunk_size: pydantic.PositiveInt = 16
     raw_action_dim: int | None = None
     view_point: str | None = None
+    predict_initial_state: bool = False
 
 
 class ActionDataOverrides(OverridesBase):
@@ -640,6 +641,10 @@ class ActionDataOverrides(OverridesBase):
     """Dimension of the raw action data. Required when action_path is not provided."""
     view_point: Training[str | None] = None
     """Viewpoint description for the action prompt."""
+    predict_initial_state: Training[bool | None] = None
+    """Image2Action checkpoints (e.g. Cosmos3-Nano-HumanAction a0): also predict the frame-0 initial-state row a0, so
+    inverse_dynamics / wam return ``action_chunk_size + 1`` rows -- row 0 is the ABSOLUTE camera-frame pose at frame 0,
+    rows 1.. the usual deltas (decode with ``human_pose_layout``). Not valid for forward_dynamics."""
 
     @override
     def download(self, output_dir: Path):
@@ -655,6 +660,8 @@ class ActionDataOverrides(OverridesBase):
             self.action_chunk_size = 16
         if self.view_point is None:
             self.view_point = "ego_view"
+        if self.predict_initial_state is None:
+            self.predict_initial_state = False
 
         mode = sample_meta.model_mode
         if not mode.is_action:
@@ -668,6 +675,11 @@ class ActionDataOverrides(OverridesBase):
             case ModelMode.FORWARD_DYNAMICS:
                 if self.action_path is None:
                     raise ValueError(f"'action_path' is required for model_mode={mode.value!r}")
+                if self.predict_initial_state:
+                    raise ValueError(
+                        "predict_initial_state is only defined for inverse_dynamics / wam; forward_dynamics samples "
+                        "never carry an initial-state row"
+                    )
             case ModelMode.INVERSE_DYNAMICS | ModelMode.WAM:
                 pass
             case _:

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -16,6 +17,11 @@ from cosmos_framework.data.generator.action.datasets import human_hand_pose_lero
 from cosmos_framework.data.generator.action.datasets import webhumanaction_lerobot_dataset as m
 from cosmos_framework.data.generator.action.utils.action_processing import load_action_normalizer
 from cosmos_framework.data.generator.action.utils.domain_utils import get_action_dim, get_domain_id
+from cosmos_framework.data.generator.action.utils.human_pose_layout import (
+    decode_human_pose_chains,
+    decode_initial_state_row,
+    split_initial_state,
+)
 from cosmos_framework.data.generator.action.utils.pose_utils import build_abs_pose_from_components, pose_abs_to_rel
 
 _IDENTITY_ROT6D = np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
@@ -145,6 +151,9 @@ def test_chunk_anchored_16f_resets_the_anchor_every_16_steps() -> None:
         (m.HAND_NORMALIZER_PATH, 48),
         (m.BODY_NORMALIZER_PATH, 57),
         (hand_pose_module.HUMANACTION_NORMALIZER_PATH, 57),
+        (m.HAND_INITIAL_STATE_NORMALIZER_PATH, 48),
+        (m.BODY_INITIAL_STATE_NORMALIZER_PATH, 57),
+        (hand_pose_module.HUMANACTION_INITIAL_STATE_NORMALIZER_PATH, 57),
     ],
 )
 def test_humanaction_normalizers_load_and_round_trip(stats_path: Path, dim: int) -> None:
@@ -185,6 +194,9 @@ def test_hand_dataset_end_to_end() -> None:
     assert torch.isfinite(item["action"]).all()
     raw = dataset.denormalize(item["action"])
     assert torch.isfinite(raw).all()
+    _check_initial_state_end_to_end(
+        m.WebHumanActionHandLeRobotDataset, os.environ["COSMOS_WEBHUMANACTION_HAND_LEROBOT_ROOT"], 48
+    )
 
 
 @pytest.mark.L1
@@ -199,3 +211,77 @@ def test_body_dataset_end_to_end() -> None:
     assert item["action"].shape == (72, 57)
     assert int(item["domain_id"]) == 24
     assert torch.isfinite(item["action"]).all()
+    _check_initial_state_end_to_end(
+        m.WebHumanActionBodyLeRobotDataset, os.environ["COSMOS_WEBHUMANACTION_BODY_LEROBOT_ROOT"], 57
+    )
+
+
+def _check_initial_state_end_to_end(cls: type, root: str, dim: int) -> None:
+    """Image2Action reader contract on real data: T+1 rows in ID/wam, flag set, row-aware (de)normalization."""
+    dataset = cls(root, mode="inverse_dynamics", initial_state="predict")
+    item = dataset[0]
+    assert item["action"].shape == (73, dim) and item["has_initial_state"] is True
+    assert torch.isfinite(item["action"]).all()
+    raw = dataset.denormalize(item["action"])  # row count -> a0 routing
+    assert raw.shape == (73, dim) and torch.isfinite(raw).all()
+    torch.testing.assert_close(dataset.normalize(raw), item["action"], atol=1e-4, rtol=1e-4)
+    # The same window WITHOUT a0 must equal rows 1.. of the a0 window (a0 is prepended, deltas unchanged).
+    plain_dataset = cls(root, mode="inverse_dynamics")
+    torch.testing.assert_close(raw[1:], plain_dataset.denormalize(plain_dataset[0]["action"]), atol=1e-5, rtol=1e-5)
+    # Forward dynamics never carries a0.
+    fd = cls(root, mode="forward_dynamics", initial_state="predict")[0]
+    assert fd["action"].shape == (72, dim) and fd["has_initial_state"] is False
+
+
+@pytest.mark.L0
+def test_initial_state_row_is_the_absolute_frame0_pose() -> None:
+    """a0 = [(head,) right wrist, right tips, left wrist, left tips] at frame 0, absolute, camera frame."""
+    num_frames = 17
+    t = np.linspace(0.0, 1.0, num_frames, dtype=np.float32)[:, None]
+    right = np.array([0.1, -0.2, 0.5], dtype=np.float32) + t * np.array([0.3, 0.0, 0.1], dtype=np.float32)
+    left = np.array([-0.2, -0.1, 0.6], dtype=np.float32) + t * np.array([0.0, 0.2, 0.0], dtype=np.float32)
+    head = np.array([0.0, -0.3, 0.1], dtype=np.float32) + t * np.array([0.05, 0.0, 0.0], dtype=np.float32)
+    sample = _sample(num_frames, right_wrist=right, left_wrist=left, head_xyz=head)
+    for build, layout, dim, has_head in (
+        (m.build_webhumanaction_hand_action, m.HAND_LAYOUT, 48, False),
+        (m.build_webhumanaction_body_action, m.BODY_LAYOUT, 57, True),
+    ):
+        plain = build(sample)
+        window = build(sample, include_initial_state=True)
+        assert window.shape == (num_frames, dim) and plain.shape == (num_frames - 1, dim)
+        a0, rows = split_initial_state(window)
+        np.testing.assert_array_equal(rows, plain)  # a0 is prepended; the delta rows are untouched
+        anchors = decode_initial_state_row(a0, layout)
+        # Aligned camera-frame wrist poses at frame 0 (identity joint rotations -> the alignment itself).
+        np.testing.assert_allclose(anchors.wrist_poses[0][:3, 3], right[0], atol=1e-6)
+        np.testing.assert_allclose(
+            anchors.wrist_poses[0][:3, :3], m.WRIST_FRAME_ALIGN_ACTION100M_RIGHT[:3, :3], atol=1e-5
+        )
+        np.testing.assert_allclose(anchors.wrist_poses[1][:3, 3], left[0], atol=1e-6)
+        np.testing.assert_allclose(
+            anchors.wrist_poses[1][:3, :3], m.WRIST_FRAME_ALIGN_ACTION100M_LEFT[:3, :3], atol=1e-5
+        )
+        # Frame-0 fingertips in the wrist-0 frame: same rigid hand as the delta rows carry at frame 1.
+        np.testing.assert_allclose(anchors.fingers_local[0].reshape(-1), rows[0, layout.fingers_slice(0)], atol=1e-5)
+        if has_head:
+            np.testing.assert_allclose(anchors.head_pose[:3, 3], head[0], atol=1e-6)
+            np.testing.assert_allclose(anchors.head_pose[:3, :3], np.eye(3), atol=1e-6)
+        else:
+            assert anchors.head_pose is None
+        # a0 as the only anchor + the deltas reproduce the camera-frame wrist trajectory (static camera).
+        chains = decode_human_pose_chains(rows, layout, anchors, pose_convention=m.DEFAULT_POSE_CONVENTION)
+        np.testing.assert_allclose(chains.wrist_poses[0][:, :3, 3], right, atol=1e-4)
+        np.testing.assert_allclose(chains.wrist_poses[1][:, :3, 3], left, atol=1e-4)
+        if has_head:
+            np.testing.assert_allclose(chains.head_poses[:, :3, 3], head, atol=1e-4)
+
+
+@pytest.mark.L0
+def test_initial_state_stats_match_the_arm_widths() -> None:
+    for path, dim in (
+        (m.HAND_INITIAL_STATE_NORMALIZER_PATH, 48),
+        (m.BODY_INITIAL_STATE_NORMALIZER_PATH, 57),
+        (hand_pose_module.HUMANACTION_INITIAL_STATE_NORMALIZER_PATH, 57),
+    ):
+        stats = json.loads(path.read_text())["global"]
+        assert all(len(stats[key]) == dim for key in ("mean", "std", "q01", "q99"))

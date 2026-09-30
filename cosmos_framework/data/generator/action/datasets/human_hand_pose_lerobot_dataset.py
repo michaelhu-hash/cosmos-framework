@@ -20,6 +20,11 @@ from cosmos_framework.data.generator.action.datasets.base_dataset import (
     ActionBaseDataset,
 )
 from cosmos_framework.data.generator.action.utils.action_spec import ActionSpec, Pos, Rot, build_action_spec
+from cosmos_framework.data.generator.action.utils.human_pose_layout import (
+    HumanPoseAnchors,
+    HumanPoseLayout,
+    encode_initial_state_row,
+)
 from cosmos_framework.data.generator.action.utils.pose_utils import build_abs_pose_from_components, pose_abs_to_rel
 
 PoseConvention = Literal[
@@ -47,6 +52,11 @@ _NORMALIZER_PATH = Path(__file__).parent.parent / "normalizer_stats/human_hand_p
 HUMANACTION_NORMALIZER_PATH = (
     Path(__file__).parent.parent / "normalizer_stats/human_hand_pose_humanaction_lerobot_stats.json"
 )
+# Image2Action initial-state (a0) stats of the HumanAction joint a0 model for this arm (q01/q99, 57D).
+HUMANACTION_INITIAL_STATE_NORMALIZER_PATH = (
+    Path(__file__).parent.parent / "normalizer_stats/human_hand_pose_humanaction_initial_state_stats.json"
+)
+HAND_POSE_LAYOUT = HumanPoseLayout.hand_pose()
 
 # Rotate the source wrist frames into the unified convention:
 # X = thumb-to-pinky, Y = outward palm normal, Z = wrist-to-fingertips.
@@ -68,6 +78,12 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
     Source video and pose annotations are sampled at 30 FPS by default and
     decoded at 15 FPS for Cosmos3-Nano, yielding 17 video frames and 16 action
     transitions for the default chunk.
+
+    ``initial_state="predict"`` (Image2Action, HumanAction a0 checkpoints) prepends the frame-0
+    initial-state row a0 to inverse-dynamics / wam windows: identity camera block, ABSOLUTE
+    camera-frame aligned wrist poses at frame 0 and frame-0 fingertips in the wrist-0 frame
+    (see ``human_pose_layout``). Needs an asinh-family normalizer plus the a0 stats
+    (``HUMANACTION_INITIAL_STATE_NORMALIZER_PATH`` by default).
     """
 
     def __init__(
@@ -83,6 +99,8 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
         sample_stride: int = 1,
         image_key: str = _IMAGE_FEATURE,
         stats_path: str | Path | None = None,
+        initial_state: Literal["predict"] | None = None,
+        initial_state_stats_path: str | Path | None = None,
     ) -> None:
         if viewpoint != "ego_view":
             raise NotImplementedError("Human hand-pose data only supports ego_view.")
@@ -102,6 +120,8 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
             action_normalization=action_normalization,
             sample_stride=sample_stride,
             stats_path=stats_path,
+            initial_state=initial_state,
+            initial_state_stats_path=initial_state_stats_path,
         )
         source_fps = float(self._info["fps"])
         source_stride = source_fps / self._fps
@@ -148,6 +168,10 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
     def _stats_path(cls) -> Path:
         return _NORMALIZER_PATH
 
+    @classmethod
+    def _initial_state_stats_path(cls) -> Path:
+        return HUMANACTION_INITIAL_STATE_NORMALIZER_PATH
+
     def __len__(self) -> int:
         return len(self._valid_starts)
 
@@ -164,13 +188,16 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
 
         episode = self._episodes[episode_index]
         video = self._load_video(episode, rows)
-        raw_action = self._build_raw_action(rows)
+        include_initial_state = self.wants_initial_state(mode)
+        raw_action = self._build_raw_action(rows, include_initial_state=include_initial_state)
         subtask_index = int(rows[0].get("subtask_index", -1))
         task = self._tasks[int(rows[0]["task_index"])]
         caption = self._subtasks.get(subtask_index, task)
         ai_caption = random.choice([part.strip() for part in caption.split(" | ") if part.strip()] or [caption])
 
-        result = self._build_result(mode=mode, video=video, action=raw_action, ai_caption=ai_caption)
+        result = self._build_result(
+            mode=mode, video=video, action=raw_action, ai_caption=ai_caption, has_initial_state=include_initial_state
+        )
         if self.action_normalization in LEGACY_NORMALIZATION_METHODS:
             # Base Cosmos3-Nano recipe: quantile normalization with a hard clamp. The asinh-family normalizers
             # compress tails instead and must not be clamped.
@@ -187,18 +214,21 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
         )
 
     @staticmethod
-    def _finger_positions_in_wrist_frame(position_data: np.ndarray, wrist_poses: np.ndarray) -> np.ndarray:
-        future_positions = position_data[1:].reshape(-1, _NUM_JOINTS, 3)
+    def _finger_positions_in_wrist_frame(
+        position_data: np.ndarray, wrist_poses: np.ndarray, frames: slice = slice(1, None)
+    ) -> np.ndarray:
+        """Fingertips in the aligned wrist frame of the same frame; frames ``1..T`` by default (delta rows), ``0:1`` for a0."""
+        future_positions = position_data[frames].reshape(-1, _NUM_JOINTS, 3)
         fingertips = future_positions[:, _FINGERTIP_JOINT_IDXS, :]
         fingertips_h = np.concatenate(
             [fingertips, np.ones((*fingertips.shape[:-1], 1), dtype=np.float32)],
             axis=-1,
         )
-        wrist_inv = np.linalg.inv(wrist_poses[1:])
+        wrist_inv = np.linalg.inv(wrist_poses[frames])
         fingertips_wrist = np.einsum("tij,tnj->tni", wrist_inv, fingertips_h)[..., :3]
         return fingertips_wrist.reshape(len(future_positions), -1)
 
-    def _build_raw_action(self, rows: list[dict[str, Any]]) -> torch.Tensor:
+    def _build_raw_action(self, rows: list[dict[str, Any]], include_initial_state: bool = False) -> torch.Tensor:
         def values(key: str) -> np.ndarray:
             return np.asarray([row[key] for row in rows], dtype=np.float32)
 
@@ -230,11 +260,28 @@ class HumanHandPoseLeRobotDataset(ActionBaseDataset):
             ],
             axis=-1,
         )
-        if action.shape != (self._chunk_length, _RAW_ACTION_DIM):
-            raise ValueError(
-                f"Expected hand-pose action shape {(self._chunk_length, _RAW_ACTION_DIM)}, got {action.shape}."
+        if include_initial_state:
+            anchors = HumanPoseAnchors(
+                wrist_poses=(right_wrist_camera[0].astype(np.float64), left_wrist_camera[0].astype(np.float64)),
+                fingers_local=(
+                    self._finger_positions_in_wrist_frame(right_positions, right_wrist_camera, slice(0, 1)).reshape(
+                        -1, 3
+                    ),
+                    self._finger_positions_in_wrist_frame(left_positions, left_wrist_camera, slice(0, 1)).reshape(
+                        -1, 3
+                    ),
+                ),
             )
+            action = np.concatenate([encode_initial_state_row(HAND_POSE_LAYOUT, anchors)[None], action], axis=0)
+        expected_rows = self._chunk_length + int(include_initial_state)
+        if action.shape != (expected_rows, _RAW_ACTION_DIM):
+            raise ValueError(f"Expected hand-pose action shape {(expected_rows, _RAW_ACTION_DIM)}, got {action.shape}.")
         return torch.from_numpy(action).float()
 
 
-__all__ = ["HumanHandPoseLeRobotDataset"]
+__all__ = [
+    "HAND_POSE_LAYOUT",
+    "HUMANACTION_INITIAL_STATE_NORMALIZER_PATH",
+    "HUMANACTION_NORMALIZER_PATH",
+    "HumanHandPoseLeRobotDataset",
+]
